@@ -1,0 +1,24 @@
+{
+  "easymode-write": {
+    "description": "OpenWrt EasyMode - apply operating modes and network settings (phase 3+)",
+    "read": {
+      "ubus": {
+        "uci": ["changes"]
+      }
+    },
+    "write": {
+      "ubus": {
+        "uci": ["set", "add", "delete", "revert", "commit", "apply", "confirm", "rollback"],
+        "network": ["reload", "restart"],
+        "network.interface": ["up", "down"],
+        "network.wireless": ["up", "down"],
+        "system": ["reboot"],
+        "file": ["write"]
+      },
+      "uci": ["network", "wireless", "dhcp", "firewall", "sqm", "easymode"],
+      "file": {
+        "/etc/config/easymode": ["write"]
+      }
+    }
+  }
+}

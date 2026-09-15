@@ -1,0 +1,26 @@
+{
+  "easymode-read": {
+    "description": "OpenWrt EasyMode - read-only status access (phases 1-2)",
+    "read": {
+      "ubus": {
+        "session": ["access", "destroy"],
+        "system": ["board", "info"],
+        "network.interface": ["dump", "status"],
+        "network.device": ["status"],
+        "network.wireless": ["status"],
+        "iwinfo": ["devices", "info", "assoclist", "scan", "freqlist"],
+        "uci": ["get"],
+        "file": ["read", "exec"]
+      },
+      "uci": ["network", "wireless", "dhcp", "firewall", "system", "sqm", "nlbwmon", "easymode"],
+      "file": {
+        "/proc/stat": ["read"],
+        "/proc/uptime": ["read"],
+        "/tmp/dhcp.leases": ["read"],
+        "/etc/board.json": ["read"],
+        "/bin/ping": ["exec"],
+        "/usr/sbin/nlbw": ["exec"]
+      }
+    }
+  }
+}
