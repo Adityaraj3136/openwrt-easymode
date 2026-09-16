@@ -1,7 +1,10 @@
 {
   "name": "openwrt-easymode",
   "version": "0.2.0",
-  "private": true,
+  "private": false,
+  "bin": {
+    "openwrt-easymode": "./bin/easymode.js"
+  },
   "type": "module",
   "description": "Simple operating-mode focused management UI for OpenWrt routers",
   "engines": {
