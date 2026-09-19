@@ -455,66 +455,85 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     // Wi-Fi
     // ═══════════════════════════════════════════════════════════
     private fun buildWifiSummary(): JSONObject {
-        val radios = buildRadiosArray()
+        val radios = buildRadiosArray(false)
         return JSONObject().put("supported", radios.length() > 0).put("repeaterPaused", false).put("radios", radios)
     }
 
     private fun buildWifi(): Response {
-        val wireless = uciOf("wireless"); val radios = JSONArray(); val networks = JSONArray()
-        wireless.keys().forEach { k ->
-            val s = wireless.optJSONObject(k) ?: return@forEach
-            val type = s.optString(".type").ifEmpty {
-                // Fallback: infer type from section name pattern (radio0, radio1 = wifi-device)
-                if (k.matches(Regex("radio\\d+"))) "wifi-device" else "wifi-iface"
-            }
-            when (type) {
-                "wifi-device" -> {
-                    val info = tryCall("iwinfo", "info", JSONObject().put("device", k)) ?: JSONObject()
-                    val band = bandFromSection(s)
-                    radios.put(JSONObject().put("id", k).put("band", band)
-                        .put("label", if (band == "5GHz") "5 GHz" else "2.4 GHz")
-                        .put("enabled", s.optString("disabled") != "1")
-                        .put("channel", s.opt("channel") ?: info.opt("channel"))
-                        .put("txpower", s.opt("txpower") ?: info.opt("txpower"))
-                        .put("htmode", s.optString("htmode", "auto"))
-                        .put("country", s.optString("country", "00")).put("clients", 0))
-                }
-                "wifi-iface" -> {
-                    val radioId = s.optString("device")
-                    val radioSection = wireless.optJSONObject(radioId) ?: JSONObject()
-                    networks.put(JSONObject().put("id", k).put("radio", radioId)
-                        .put("band", bandFromSection(radioSection)).put("mode", s.optString("mode", "ap"))
-                        .put("ssid", s.optString("ssid")).put("encryption", s.optString("encryption", "none"))
-                        .put("disabled", s.optString("disabled") == "1").put("hidden", s.optString("hidden") == "1"))
-                }
-            }
-        }
-        return ok(JSONObject().put("radios", radios).put("networks", networks)
-            .put("schedule", JSONObject().put("enabled", false)).put("stationCount", 0))
+        val radios = buildRadiosArray(true)
+        return ok(JSONObject().put("radios", radios).put("supported", radios.length() > 0))
     }
 
-    private fun buildRadiosArray(): JSONArray {
-        val wireless = uciOf("wireless"); val out = JSONArray()
+    private fun buildRadiosArray(detailed: Boolean): JSONArray {
+        val wireless = uciOf("wireless")
+        val netWireless = tryCall("network.wireless", "status") ?: JSONObject()
+        val out = JSONArray()
+
         wireless.keys().forEach { k ->
             val s = wireless.optJSONObject(k) ?: return@forEach
             val type = s.optString(".type").ifEmpty {
                 if (k.matches(Regex("radio\\d+"))) "wifi-device" else "wifi-iface"
             }
             if (type != "wifi-device") return@forEach
-            var ssid: String? = null
-            wireless.keys().forEach { ik ->
-                val iface = wireless.optJSONObject(ik) ?: return@forEach
-                if (iface.optString(".type") == "wifi-iface" && iface.optString("device") == k && iface.optString("mode", "ap") == "ap")
-                    ssid = iface.optString("ssid", null)
+
+            val interfaces = JSONArray()
+            var primarySsid: String? = null
+            var clients = 0
+
+            // Add active interfaces from network.wireless first (they have live runtime data)
+            val netRadio = netWireless.optJSONObject(k)
+            val netInterfaces = netRadio?.optJSONArray("interfaces") ?: JSONArray()
+            
+            for (i in 0 until netInterfaces.length()) {
+                val netIface = netInterfaces.optJSONObject(i) ?: continue
+                val cfg = netIface.optJSONObject("config") ?: JSONObject()
+                val mode = cfg.optString("mode", "ap")
+                val ssid = cfg.optString("ssid", null)
+                val ifname = netIface.optString("ifname", "")
+                
+                if (mode == "ap" && primarySsid == null) primarySsid = ssid
+                
+                if (detailed && ifname.isNotEmpty()) {
+                    val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", ifname))
+                    clients += assoc?.optJSONArray("results")?.length() ?: 0
+                }
+                
+                interfaces.put(JSONObject()
+                    .put("section", cfg.optString(".name", null))
+                    .put("ifname", ifname)
+                    .put("mode", mode)
+                    .put("ssid", ssid)
+                    .put("network", cfg.opt("network")?.let { if (it is JSONArray) it else JSONArray().put(it) } ?: JSONArray())
+                    .put("encryption", cfg.optString("encryption", "none"))
+                    .put("disabled", cfg.optString("disabled", "0") == "1")
+                    .put("hidden", cfg.optString("hidden", "0") == "1")
+                )
             }
+
             val band = bandFromSection(s)
-            out.put(JSONObject().put("id", k).put("band", band)
+            val info = if (detailed) tryCall("iwinfo", "info", JSONObject().put("device", k)) ?: JSONObject() else null
+
+            val radioObj = JSONObject()
+                .put("id", k)
+                .put("band", band)
                 .put("label", if (band == "5GHz") "5 GHz" else "2.4 GHz")
-                .put("enabled", s.optString("disabled") != "1").put("ssid", ssid)
-                .put("channel", s.opt("channel")).put("clients", 0).put("interfaces", JSONArray()))
+                .put("enabled", s.optString("disabled") != "1")
+                .put("ssid", primarySsid)
+                .put("channel", s.opt("channel") ?: info?.opt("channel"))
+                .put("clients", clients)
+                .put("interfaces", interfaces)
+
+            if (detailed) {
+                radioObj.put("txpower", s.opt("txpower") ?: info?.opt("txpower"))
+                radioObj.put("htmode", s.optString("htmode", "auto"))
+                radioObj.put("country", s.optString("country", "00"))
+            }
+
+            out.put(radioObj)
         }
         return out
     }
+
 
     private fun buildWifiClients(): Response {
         val clients = JSONArray()

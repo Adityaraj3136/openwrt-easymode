@@ -179,9 +179,9 @@
 @media (max-width: 860px) {
   /* Mode grid: always single column on mobile */
   .mode-grid { grid-template-columns: 1fr; gap: 12px; }
-  .mode-card-new { flex-direction: row; gap: 12px; align-items: flex-start; padding: 14px; }
+  .mode-card-new { padding: 14px; }
   .mode-card-new .mode-visual { display: none; } /* hide diagram on phones to save space */
-  .mode-card-new .btn { width: auto; min-width: 100px; white-space: nowrap; }
+
 
   /* Setup/wizard: full-width */
   .setup-card, .progress-card, .wizard { max-width: 100%; }
