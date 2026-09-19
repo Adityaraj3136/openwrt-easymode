@@ -2,6 +2,7 @@ package com.example.easymode
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -55,12 +56,17 @@ fun WebViewScreen() {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                // Fix for responsive design:
                 settings.useWideViewPort = true
                 settings.loadWithOverviewMode = true
                 settings.setSupportZoom(false)
                 settings.builtInZoomControls = false
                 settings.displayZoomControls = false
+
+                // Enable cookies so the session cookie survives between requests
+                CookieManager.getInstance().apply {
+                    setAcceptCookie(true)
+                    setAcceptThirdPartyCookies(this@apply, true)
+                }
 
                 webViewClient = WebViewClient()
                 loadUrl("http://localhost:8080/")
