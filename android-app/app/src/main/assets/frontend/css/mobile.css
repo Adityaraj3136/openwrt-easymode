@@ -1,0 +1,335 @@
+/* ============================================================
+   EasyMode — Mobile UI Improvements
+   Loaded after app.css to override and enhance for small screens.
+   ============================================================ */
+
+/* ── Bottom navigation bar (mobile only) ─────────────────── */
+.bottom-nav {
+  display: none;
+}
+
+@media (max-width: 860px) {
+  /* Hide the top navbar entirely on mobile — we use bottom nav instead */
+  .navbar { display: none !important; }
+  .nav-toggle { display: none !important; }
+
+  /* Bottom nav bar */
+  .bottom-nav {
+    display: flex;
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    z-index: 20;
+    background: var(--surface);
+    border-top: 1px solid var(--line);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    box-shadow: 0 -4px 20px rgba(32,33,36,0.06);
+  }
+  .bottom-nav-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    padding: 8px 4px 6px;
+    text-decoration: none;
+    color: var(--text-faint);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    min-height: 54px;
+    transition: color 0.14s var(--ease);
+    -webkit-tap-highlight-color: transparent;
+    border: none;
+    background: none;
+    cursor: pointer;
+    position: relative;
+  }
+  .bottom-nav-item svg { transition: transform 0.14s var(--ease); }
+  .bottom-nav-item.active { color: var(--accent-strong); }
+  .bottom-nav-item.active svg { transform: scale(1.1); }
+  .bottom-nav-item.active::before {
+    content: '';
+    position: absolute;
+    top: 6px; left: 50%;
+    transform: translateX(-50%);
+    width: 32px; height: 32px;
+    border-radius: var(--r-pill);
+    background: var(--accent-soft);
+  }
+  .bottom-nav-item svg { position: relative; z-index: 1; }
+  .bottom-nav-item span { position: relative; z-index: 1; }
+
+  /* Adjust main content so it doesn't hide behind bottom nav */
+  .main {
+    padding-bottom: calc(70px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  /* Appbar: cleaner on mobile — just brand + account */
+  .appbar-inner { padding: 0 14px; }
+  .brand-text span { display: none; }
+}
+
+/* ── Appbar improvements ──────────────────────────────────── */
+@media (max-width: 480px) {
+  .appbar-inner { height: 52px; }
+  .brand-mark { width: 30px; height: 30px; border-radius: 9px; }
+  .brand-text strong { font-size: 15px; }
+  .navbar { top: calc(52px + env(safe-area-inset-top, 0px)); }
+}
+
+/* ── Touch target improvements ────────────────────────────── */
+@media (max-width: 860px) {
+  /* All interactive elements: minimum 44px touch target */
+  .btn { min-height: 44px; }
+  .btn-small { min-height: 36px; }
+  .field input, .field select { min-height: 48px; font-size: 16px; } /* 16px prevents iOS zoom */
+
+  /* Table rows: taller for easier tapping */
+  .data-table td { padding: 14px 10px; }
+  .data-table th { padding: 10px; }
+
+  /* Scan rows: more padding */
+  .scan-row { padding: 14px; }
+
+  /* Choice tiles */
+  .choice { padding: 16px; }
+
+  /* Action rows */
+  .action-row { padding: 16px; }
+
+  /* Device rows in DHCP */
+  .device-row { padding: 12px 4px; }
+
+  /* Switch rows */
+  .switch-row { padding: 6px 0; gap: 14px; }
+  .switch { width: 46px; height: 26px; }
+  .switch .slider::before { width: 20px; height: 20px; }
+  .switch input:checked + .slider::before { transform: translateX(20px); }
+}
+
+/* ── Dashboard improvements ───────────────────────────────── */
+@media (max-width: 860px) {
+  /* Hero: tighter */
+  .hero { margin-bottom: 14px; }
+  .hero h1 { font-size: 22px; }
+  .hero p { font-size: 14px; }
+
+  /* Topology: simplified view */
+  .topology-card { padding: 14px 12px; }
+  .topo-node { min-width: 70px; gap: 6px; }
+  .topo-label { font-size: 12.5px; }
+  .topo-sub { font-size: 11.5px; }
+
+  /* Mode strip */
+  .mode-strip { gap: 12px; }
+  .mode-strip h2 { font-size: 19px; }
+  .mode-strip p { font-size: 13.5px; }
+
+  /* Stat rows: wrap to 2-up grid on phones */
+  .stat-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .stat .value { font-size: 20px; }
+
+  /* Ring row: stack on very small */
+  .ring-row { gap: 14px; }
+
+  /* Device split chips: always 2 columns */
+  .device-split { display: grid; grid-template-columns: 1fr 1fr; }
+
+  /* Band cards: single column */
+  .split { grid-template-columns: 1fr; }
+
+  /* Section heads: tighter */
+  .section-head { margin: 18px 0 10px; }
+  .section-head h2 { font-size: 17px; }
+}
+
+/* ── Wi-Fi improvements ───────────────────────────────────── */
+@media (max-width: 860px) {
+  /* Scan results: better on mobile */
+  .scan-list { max-height: 260px; }
+  .scan-main strong { font-size: 14px; }
+
+  /* Radio config form: full-width buttons */
+  .radio-config .setup-form .btn-primary { width: 100%; }
+
+  /* Congestion items: 3-up grid */
+  .congestion { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .congestion-item { min-width: 0; }
+
+  /* Rate row: 2-col */
+  .rate-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+}
+
+/* ── DHCP / Device list improvements ─────────────────────── */
+@media (max-width: 860px) {
+  /* Table: hide less important columns on phones */
+  .data-table .hide-mobile { display: none; }
+
+  /* Full-width add/action buttons */
+  .button-row { flex-direction: column; gap: 8px; }
+  .button-row .btn { width: 100%; justify-content: center; }
+
+  /* Reservation and block list: more breathing room */
+  .kv .row { flex-wrap: wrap; gap: 4px; }
+  .kv .row .v { margin-left: auto; }
+}
+
+/* ── Mode cards ───────────────────────────────────────────── */
+@media (max-width: 860px) {
+  /* Mode grid: always single column on mobile */
+  .mode-grid { grid-template-columns: 1fr; gap: 12px; }
+  .mode-card-new { flex-direction: row; gap: 12px; align-items: flex-start; padding: 14px; }
+  .mode-card-new .mode-visual { display: none; } /* hide diagram on phones to save space */
+  .mode-card-new .btn { width: auto; min-width: 100px; white-space: nowrap; }
+
+  /* Setup/wizard: full-width */
+  .setup-card, .progress-card, .wizard { max-width: 100%; }
+  .setup-form .btn-primary { width: 100%; }
+
+  /* Stepper: compact */
+  .stepper { gap: 0; justify-content: center; margin-bottom: 18px; }
+  .stepper-bar { min-width: 12px; margin: 0 6px; }
+
+  /* Wizard footer buttons */
+  .wizard-foot { flex-direction: column-reverse; }
+  .wizard-foot .spacer { display: none; }
+  .wizard-foot .btn { width: 100%; }
+}
+
+/* ── System page ──────────────────────────────────────────── */
+@media (max-width: 860px) {
+  /* Ring row: stack vertically */
+  .ring-row { flex-direction: column; align-items: flex-start; }
+  .ring-item { gap: 14px; }
+
+  /* Review lists */
+  .review-list { border-radius: var(--r); }
+  .review-row { flex-wrap: wrap; }
+  .review-row .v { text-align: left; margin-left: 0; font-size: 13px; }
+
+  /* Action rows: stack label and arrow */
+  .action-row { padding: 14px; }
+}
+
+/* ── Diagnostics ──────────────────────────────────────────── */
+@media (max-width: 860px) {
+  /* Output box: full-width, good height */
+  pre, .output-box, [class*="output"] {
+    font-size: 12px;
+    max-height: 260px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+}
+
+/* ── Bandwidth ────────────────────────────────────────────── */
+@media (max-width: 860px) {
+  .rate { flex: 1 1 auto; }
+  .rate .big { font-size: 22px; }
+}
+
+/* ── Modals: full-screen sheet on mobile ──────────────────── */
+@media (max-width: 860px) {
+  .modal-overlay { align-items: flex-end; padding: 0; }
+  .modal {
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    max-width: 100% !important;
+    max-height: 88vh;
+  }
+  .modal-foot { flex-direction: column; gap: 8px; }
+  .modal-foot .btn { width: 100%; }
+  /* Primary action on top on mobile */
+  .modal-foot .btn-primary { order: -1; }
+}
+
+/* ── Cards: improved mobile feel ─────────────────────────── */
+@media (max-width: 480px) {
+  .card { border-radius: var(--r); padding: 14px; }
+  .card h3 { font-size: 13.5px; margin-bottom: 12px; }
+  .card-icon { width: 32px; height: 32px; border-radius: 9px; }
+  .card-title h2 { font-size: 15px; }
+  .topology-card { padding: 12px 10px; }
+  .topo-glyph { width: 54px; height: 54px; border-radius: 16px; }
+  .topo-node { min-width: 60px; }
+
+  /* Inputs */
+  .field { margin-bottom: 14px; }
+  .field label { font-size: 13px; }
+  .field input, .field select { padding: 11px 14px; border-radius: var(--r-sm); }
+  .field .hint { font-size: 12px; }
+
+  /* Page head */
+  .page-head { margin-bottom: 14px; }
+  .page-head h1 { font-size: 19px; }
+  .page-head p { font-size: 13.5px; }
+
+  /* Hero */
+  .hero h1 { font-size: 19px; }
+
+  /* Badges */
+  .badge { font-size: 11.5px; padding: 4px 9px; }
+}
+
+/* ── Login improvements ───────────────────────────────────── */
+@media (max-width: 860px) {
+  .login-wrap { grid-template-columns: 1fr; min-height: 100svh; }
+  .login-art {
+    min-height: 140px; max-height: 180px;
+    padding: 22px 20px 18px;
+    flex-direction: row; align-items: center; gap: 16px;
+  }
+  .login-art > div:first-child { display: none; } /* hide brand-text */
+  .login-art h1 { font-size: 18px; max-width: 26ch; }
+  .login-art p { display: none; }
+  .login-art .mode-chips { display: none; }
+  .login-panel { padding: 20px 16px 24px; align-items: stretch; }
+  .login-card {
+    width: 100%; max-width: 440px; margin: 0 auto;
+    padding: 22px 18px; border-radius: var(--r-lg);
+  }
+  .login-card h2 { font-size: 19px; }
+  .login-card .sub { font-size: 13.5px; margin-bottom: 18px; }
+  .login-card .btn-primary { min-height: 48px; font-size: 15px; width: 100%; }
+}
+
+@media (max-width: 480px) {
+  .login-art { min-height: 110px; padding: 16px 14px; }
+  .login-art h1 { font-size: 16px; }
+  .login-panel { padding: 14px 12px 20px; }
+  .login-card { padding: 18px 14px; border-radius: var(--r); }
+}
+
+/* ── Scrollbar: hide on mobile ────────────────────────────── */
+@media (max-width: 860px) {
+  .scan-list::-webkit-scrollbar,
+  .modal-body::-webkit-scrollbar { display: none; }
+  .scan-list, .modal-body { scrollbar-width: none; }
+}
+
+/* ── Disclosure: easier to tap ────────────────────────────── */
+@media (max-width: 860px) {
+  .disclosure > summary { padding: 8px 0; font-size: 13px; }
+  .disclosure .body { margin-top: 10px; }
+}
+
+/* ── Toast: full-width and higher on mobile ───────────────── */
+@media (max-width: 860px) {
+  .toast-host {
+    left: 10px; right: 10px;
+    bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+    max-width: none;
+  }
+}
+
+/* ── Presets (channel chips etc.) ─────────────────────────── */
+@media (max-width: 480px) {
+  .presets { gap: 6px; }
+  .chip { font-size: 12.5px; padding: 5px 12px; }
+}
+
+/* ── Page-level spacing ───────────────────────────────────── */
+@media (max-width: 860px) {
+  .grid { gap: 12px; }
+}

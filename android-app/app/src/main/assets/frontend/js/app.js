@@ -81,6 +81,7 @@ function accountMenu(session) {
 function shell(session) {
   const main = el('main', { class: 'main', id: 'main', tabindex: '-1' });
 
+  // ── Top nav links (desktop) ─────────────────────────────
   const navLinks = NAV.map((item) =>
     el(
       'a',
@@ -101,6 +102,24 @@ function shell(session) {
   nav.addEventListener('click', (event) => {
     if (event.target.closest('.nav-link')) nav.classList.remove('open');
   });
+
+  // ── Bottom nav bar (mobile) ─────────────────────────────
+  // Show only 5 most important items to avoid cramping
+  const BOTTOM_NAV = [
+    { id: 'dashboard', label: 'Home', icon: 'dashboard' },
+    { id: 'wifi',      label: 'Wi-Fi', icon: 'wifi' },
+    { id: 'dhcp',      label: 'Devices', icon: 'network' },
+    { id: 'mode',      label: 'Mode', icon: 'router' },
+    { id: 'system',    label: 'System', icon: 'settings' },
+  ];
+  const bottomNavItems = BOTTOM_NAV.map((item) =>
+    el('a', {
+      href: `#/${item.id}`,
+      class: `bottom-nav-item${item.id === state.view ? ' active' : ''}`,
+      'aria-label': item.label,
+    }, [icon(item.icon, { size: 22 }), el('span', { text: item.label })]),
+  );
+  const bottomNav = el('nav', { class: 'bottom-nav', 'aria-label': 'Main navigation' }, bottomNavItems);
 
   const statusBadge = badge(state.online ? 'Router online' : 'Router not answering', state.online ? 'ok' : 'bad');
 
@@ -133,12 +152,14 @@ function shell(session) {
         ])
       : null,
     main,
+    bottomNav,
   ]);
 
   clear(root).className = '';
   root.append(el('a', { class: 'skip-link', href: '#main', text: 'Skip to content' }), app);
   return main;
 }
+
 
 /** Views report reachability so the header badge reflects reality. */
 function setOnline(online) {
