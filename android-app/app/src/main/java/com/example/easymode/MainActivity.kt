@@ -1,7 +1,11 @@
 package com.example.easymode
 
 import android.annotation.SuppressLint
+import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
+import android.view.View
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -20,7 +24,22 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+
+        // Make status bar transparent so the web content (with its own appbar)
+        // can draw behind it using env(safe-area-inset-top) padding in CSS.
+        // This prevents the "top not clickable" issue.
+        window.statusBarColor = Color.TRANSPARENT
+        @Suppress("DEPRECATION")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            )
+        }
+
         // Start local NanoHTTPD server
         server = EasyModeServer(this, 8080)
         try {
@@ -32,7 +51,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 Surface(
-                    modifier = Modifier.fillMaxSize(), 
+                    modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
                     WebViewScreen()
@@ -70,8 +89,6 @@ fun WebViewScreen() {
             webView.loadUrl("http://localhost:8080/")
             webView
         },
-        update = { webView ->
-            // Update logic if needed
-        }
+        update = { _ -> }
     )
 }

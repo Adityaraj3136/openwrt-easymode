@@ -218,13 +218,45 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             .put("connected", network.optJSONObject("wan")?.optBoolean("up", false) ?: false)
             .put("reachable", true)
 
+        val sysInfo = tryCall("system", "info")
+        val memInfo = sysInfo?.optJSONObject("memory") ?: JSONObject()
+        val memTotal = memInfo.optLong("total", 0)
+        val memAvail = memInfo.optLong("available", 0).let { if (it > 0) it else memInfo.optLong("free", 0) + memInfo.optLong("buffered", 0) }
+        val memUsed = if (memTotal > 0) memTotal - memAvail else 0
+        val memPercent = if (memTotal > 0) Math.round((memUsed.toDouble() / memTotal.toDouble()) * 1000.0) / 10.0 else null
+
+        val loadArr = sysInfo?.optJSONArray("load")
+        val loadList = if (loadArr != null) {
+            (0 until minOf(loadArr.length(), 3)).map { Math.round((loadArr.getDouble(it) / 65536.0) * 100.0) / 100.0 }
+        } else null
+
+        val memPayload = JSONObject()
+            .put("total", memTotal)
+            .put("used", memUsed)
+            .put("available", memAvail)
+            .put("percent", memPercent)
+            .put("cached", memInfo.opt("cached"))
+            .put("buffered", memInfo.opt("buffered"))
+
+        // cpu: we don't have /proc/stat access so report null percent gracefully
+        val cpuPayload = JSONObject()
+            .put("percent", JSONObject.NULL)
+            .put("available", false)
+            .put("reason", "CPU usage not available in Android app")
+
         val system = JSONObject()
-            .put("hostname", board.optString("hostname", "OpenWrt"))
             .put("model", board.optString("model", "Router"))
-            .put("release", board.optJSONObject("release")?.optString("description", "") ?: "")
-            .put("uptimeSeconds", tryCall("system", "info")?.optLong("uptime", 0) ?: 0)
-            .put("memory", buildMemoryPayload())
-            .put("loadAvg", buildLoadAvgPayload())
+            .put("hostname", board.optString("hostname", "OpenWrt"))
+            .put("boardName", board.optString("board_name", ""))
+            .put("processor", board.optString("system", ""))
+            .put("firmware", board.optJSONObject("release")?.optString("description", "") ?: "")
+            .put("version", board.optJSONObject("release")?.optString("version", "") ?: "")
+            .put("kernel", board.optString("kernel", ""))
+            .put("uptimeSeconds", sysInfo?.optLong("uptime", 0) ?: 0)
+            .put("uptime", formatUptime(sysInfo?.optLong("uptime", 0) ?: 0))
+            .put("memory", memPayload)
+            .put("cpu", cpuPayload)
+            .put("load", if (loadList != null) org.json.JSONArray(loadList) else JSONObject.NULL)
 
         val router = JSONObject()
             .put("host", activeRouterIp)
@@ -243,25 +275,22 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             .put("wifi", wifi))
     }
 
-    private fun buildMemoryPayload(): JSONObject {
-        val info = tryCall("system", "info")
-        val mem = info?.optJSONObject("memory") ?: return JSONObject()
-        val total = mem.optLong("total", 0)
-        val free = mem.optLong("free", 0) + mem.optLong("buffered", 0)
-        val used = total - free
-        return JSONObject()
-            .put("total", total)
-            .put("used", used)
-            .put("free", free)
-    }
-
-    private fun buildLoadAvgPayload(): JSONArray {
-        val info = tryCall("system", "info")
-        val load = info?.optJSONArray("load") ?: return JSONArray()
-        return JSONArray().apply {
-            for (i in 0 until minOf(load.length(), 3)) put(load.getDouble(i) / 65536.0)
+    private fun formatUptime(seconds: Long): String {
+        if (seconds <= 0) return "—"
+        val d = seconds / 86400
+        val h = (seconds % 86400) / 3600
+        val m = (seconds % 3600) / 60
+        return when {
+            d > 0 -> "${d}d ${h}h"
+            h > 0 -> "${h}h ${m}m"
+            else -> "${m}m"
         }
     }
+
+    // Kept for compatibility but buildDashboard no longer calls these directly
+    private fun buildMemoryPayload(): JSONObject = JSONObject()
+    private fun buildLoadAvgPayload(): JSONArray = JSONArray()
+
 
     // ────────────────────────────────────────────────────
     // Network status builder

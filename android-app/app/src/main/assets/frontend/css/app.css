@@ -126,6 +126,8 @@ svg { display: block; flex-shrink: 0; }
   background: var(--surface);
   border-bottom: 1px solid var(--line);
   position: sticky; top: 0; z-index: 10;
+  /* Push below the transparent Android status bar */
+  padding-top: env(safe-area-inset-top, 0px);
 }
 .appbar-inner {
   max-width: var(--content); margin: 0 auto; padding: 0 24px;
@@ -178,7 +180,7 @@ svg { display: block; flex-shrink: 0; }
 }
 .account-menu button:hover, .account-menu a:hover { background: var(--surface-muted); color: var(--accent-strong); }
 
-.navbar { background: var(--surface); border-bottom: 1px solid var(--line); position: sticky; top: 56px; z-index: 9; }
+.navbar { background: var(--surface); border-bottom: 1px solid var(--line); position: sticky; top: calc(56px + env(safe-area-inset-top, 0px)); z-index: 9; }
 .navbar-inner {
   max-width: var(--content); margin: 0 auto; padding: 0 24px;
   display: flex; align-items: center; gap: 4px; overflow-x: auto; scrollbar-width: none;
@@ -795,7 +797,7 @@ svg { display: block; flex-shrink: 0; }
 
   /* Tighter app shell */
   .appbar-inner { height: 50px; gap: 10px; }
-  .navbar { top: 50px; }
+  .navbar { top: calc(50px + env(safe-area-inset-top, 0px)); }
   .main { padding: 16px 12px calc(56px + env(safe-area-inset-bottom, 0px)) 12px; }
 
   /* Typography */
