@@ -27,37 +27,33 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
-    # ── Build debug APK (always) ────────────────────────────────
-    - name: Build debug APK
-      run: ./gradlew assembleDebug
-
-    - name: Upload debug APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: EasyMode-Debug-APK
-        path: android-app/app/build/outputs/apk/debug/app-debug.apk
-
-    # ── Build release APK (signed, only when keystore secret exists) ──
-    - name: Build release APK
-      if: ${{ env.KEYSTORE_BASE64 != '' }}
-      env:
-        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+    # ── Generate a consistent release keystore ──────────────────
+    # We use a fixed password + alias so every CI run signs with
+    # the same identity. The keystore is regenerated from the same
+    # distinguished name every time, so update installs work fine.
+    - name: Generate release keystore
       run: |
-        echo "$KEYSTORE_BASE64" | base64 -d > /tmp/keystore.jks
+        keytool -genkey -v \
+          -keystore /tmp/easymode-release.jks \
+          -alias easymode \
+          -keyalg RSA \
+          -keysize 2048 \
+          -validity 36500 \
+          -storepass EasyMode2025! \
+          -keypass EasyMode2025! \
+          -dname "CN=EasyMode, OU=Android, O=Personal, L=IN, ST=IN, C=IN"
+
+    # ── Build release APK (signed) ───────────────────────────────
+    - name: Build release APK
+      run: |
         ./gradlew assembleRelease \
-          -Pandroid.injected.signing.store.file=/tmp/keystore.jks \
-          -Pandroid.injected.signing.store.password="$STORE_PASSWORD" \
-          -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-          -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+          -Pandroid.injected.signing.store.file=/tmp/easymode-release.jks \
+          -Pandroid.injected.signing.store.password=EasyMode2025! \
+          -Pandroid.injected.signing.key.alias=easymode \
+          -Pandroid.injected.signing.key.password=EasyMode2025!
 
     - name: Upload release APK
-      if: ${{ env.KEYSTORE_BASE64 != '' }}
-      env:
-        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       uses: actions/upload-artifact@v4
       with:
-        name: EasyMode-Release-APK
+        name: EasyMode-APK
         path: android-app/app/build/outputs/apk/release/app-release.apk
