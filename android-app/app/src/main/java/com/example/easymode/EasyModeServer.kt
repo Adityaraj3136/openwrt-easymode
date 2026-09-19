@@ -223,8 +223,8 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         }
         if (uri == "/api/wifi/repeater/disconnect" && method == Method.POST) return repeaterPause(true)
         if (uri == "/api/wifi/repeater/connect" && method == Method.POST) return repeaterPause(false)
-        if (uri == "/api/wifi/guest" && method == Method.GET) return ok(JSONObject().put("enabled", false))
-        if (uri == "/api/wifi/guest" && method == Method.POST) return ok(JSONObject().put("ok", true))
+        if (uri == "/api/wifi/guest" && method == Method.GET) return buildGuestWifi()
+        if (uri == "/api/wifi/guest" && method == Method.POST) return updateGuestWifi(body)
 
         // ── DHCP ─────────────────────────────────────────────────
         if (uri == "/api/dhcp" && method == Method.GET) return buildDhcp()
@@ -301,18 +301,9 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             .put("autoReboot", JSONObject.NULL).put("memory", mem).put("cpu", cpu)
             .put("load", loadList ?: JSONObject.NULL)
         val wanUp = network.optJSONObject("wan")?.optBoolean("up", false) ?: false
-        // Attempt a real connectivity test if WAN is up
-        val internetOnline = if (wanUp) {
-            val pingResult = tryCall("file", "exec", JSONObject()
-                .put("command", "/bin/ping")
-                .put("params", JSONArray().put("-c").put("1").put("-W").put("2").put("8.8.8.8")))
-            val exitCode = pingResult?.optInt("code", 1) ?: 1
-            if (exitCode == 0) true else {
-                // Fallback: WAN is up, we just can't verify
-                null
-            }
-        } else false
-        val internet = JSONObject().put("online", internetOnline).put("method", if (internetOnline == true) "ping" else "settings")
+        // Use WAN interface up status as internet indicator
+        // Ping-based check would add 2s latency to every dashboard load
+        val internet = JSONObject().put("online", wanUp).put("method", "settings")
         val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
         return ok(JSONObject().put("fetchedAt", sdf.format(Date()))
             .put("router", JSONObject().put("host", activeRouterIp).put("username", "root")
@@ -565,8 +556,8 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 .put("wifiEncryption", defaultEncryption)
                 .put("hasWifi", radioArr.length() > 0))
             .put("preflight", JSONObject()
-                .put("router", JSONObject().put("ok", true))
-                .put("ap", JSONObject().put("suggestedUplink", "wan")))
+                .put("router", JSONObject().put("ready", true))
+                .put("ap", JSONObject().put("ready", true).put("suggestedUplink", "wan")))
             .put("available", JSONObject()
                 .put("router", true).put("ap", true)
                 .put("repeater", radioArr.length() > 0)
@@ -737,11 +728,17 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         scan?.optJSONArray("results")?.let { results ->
             for (i in 0 until results.length()) {
                 val r = results.getJSONObject(i); val sig = r.optInt("signal", -100)
+                val ch = r.optInt("channel", 0)
+                val encObj = r.optJSONObject("encryption")
+                val encEnabled = encObj?.optBoolean("enabled", false) ?: false
+                val encDesc = encObj?.optString("description", "none") ?: "none"
                 networks.put(JSONObject().put("ssid", r.optString("ssid")).put("bssid", r.optString("bssid"))
                     .put("signal", sig).put("quality", maxOf(0, minOf(100, (sig + 100) * 2)))
-                    .put("channel", r.opt("channel"))
-                    .put("encryption", r.optJSONObject("encryption")?.optBoolean("enabled", false) ?: false)
-                    .put("encryptionMode", r.optJSONObject("encryption")?.optString("description", "none") ?: "none"))
+                    .put("channel", ch)
+                    .put("band", if (ch > 14) 5 else 2.4)
+                    .put("encryption", encEnabled)
+                    .put("encryptionMode", encDesc)
+                    .put("encryptionLabel", if (encEnabled) encDesc else "Open"))
             }
         }
         val wireless = uciOf("wireless"); val radios = JSONArray()
@@ -795,6 +792,71 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     }
 
     // ═══════════════════════════════════════════════════════════
+    // Guest Wi-Fi
+    // ═══════════════════════════════════════════════════════════
+    private fun buildGuestWifi(): Response {
+        val wireless = uciOf("wireless")
+        // Look for a guest Wi-Fi interface: network contains 'guest' or ssid starts with 'Guest'
+        var guestIface: JSONObject? = null
+        var guestSection: String? = null
+        wireless.keys().forEach { k ->
+            val s = wireless.optJSONObject(k) ?: return@forEach
+            if (s.optString(".type") != "wifi-iface") return@forEach
+            val nw = s.optString("network", "")
+            val ssid = s.optString("ssid", "")
+            if (nw.contains("guest", ignoreCase = true) || ssid.startsWith("Guest", ignoreCase = true)) {
+                guestIface = s; guestSection = k
+            }
+        }
+        if (guestIface == null) {
+            return ok(JSONObject().put("enabled", false).put("ssid", "Guest Network")
+                .put("encryption", "none").put("key", JSONObject.NULL)
+                .put("ipaddr", "192.168.22.1").put("isolate", true).put("hidden", false))
+        }
+        val g = guestIface!!
+        return ok(JSONObject()
+            .put("enabled", g.optString("disabled", "0") != "1")
+            .put("ssid", g.optString("ssid", "Guest Network"))
+            .put("encryption", g.optString("encryption", "none"))
+            .put("key", g.optString("key", null))
+            .put("ipaddr", "192.168.22.1")
+            .put("isolate", g.optString("isolate", "1") == "1")
+            .put("hidden", g.optString("hidden", "0") == "1"))
+    }
+
+    private fun updateGuestWifi(body: JSONObject): Response {
+        val wireless = uciOf("wireless")
+        var guestSection: String? = null
+        wireless.keys().forEach { k ->
+            val s = wireless.optJSONObject(k) ?: return@forEach
+            if (s.optString(".type") != "wifi-iface") return@forEach
+            val nw = s.optString("network", "")
+            val ssid = s.optString("ssid", "")
+            if (nw.contains("guest", ignoreCase = true) || ssid.startsWith("Guest", ignoreCase = true)) {
+                guestSection = k
+            }
+        }
+        if (guestSection == null) {
+            // Create guest network: add a new wifi-iface on the first radio
+            val radioId = firstRadioId() ?: return err(Response.Status.BAD_REQUEST, "No radio available")
+            guestSection = "guest_iface"
+            uciAdd("wireless", guestSection!!, "wifi-iface")
+            uciSet("wireless", guestSection!!, JSONObject()
+                .put("device", radioId).put("mode", "ap").put("network", "guest"))
+        }
+        val values = JSONObject()
+        if (body.has("enabled")) values.put("disabled", if (body.optBoolean("enabled")) "0" else "1")
+        if (body.has("ssid")) values.put("ssid", body.optString("ssid"))
+        if (body.has("encryption")) values.put("encryption", body.optString("encryption"))
+        if (body.has("key")) values.put("key", body.optString("key"))
+        if (body.has("hidden")) values.put("hidden", if (body.optBoolean("hidden")) "1" else "0")
+        if (body.has("isolate")) values.put("isolate", if (body.optBoolean("isolate")) "1" else "0")
+        if (values.length() > 0) uciSet("wireless", guestSection!!, values)
+        uciCommit("wireless"); uciApply()
+        return buildGuestWifi()
+    }
+
+    // ═══════════════════════════════════════════════════════════
     // DHCP
     // ═══════════════════════════════════════════════════════════
     private fun buildDhcp(): Response {
@@ -825,13 +887,65 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         val prefix = activeRouterIp.substringBeforeLast('.')
         val rangeStart = "$prefix.$start"
         val rangeEnd = "$prefix.${start + limit - 1}"
+
+        // Build leases from DHCP leases file if available
+        val leases = JSONArray()
+        var leasesAvailable = false
+        val leasesRes = tryCall("file", "read", JSONObject().put("path", "/tmp/dhcp.leases"))
+        if (leasesRes != null) {
+            leasesAvailable = true
+            val leaseData = leasesRes.optString("data", "")
+            leaseData.split("\n").forEach { line ->
+                val parts = line.trim().split(" ")
+                if (parts.size >= 4) {
+                    val mac = parts[1].lowercase()
+                    val ip = parts[2]
+                    val host = if (parts[3] != "*") parts[3] else null
+                    val expiry = parts[0].toLongOrNull()
+                    if (mac != "00:00:00:00:00:00") {
+                        leases.put(JSONObject()
+                            .put("mac", mac).put("ip", ip)
+                            .put("hostname", host).put("name", host)
+                            .put("expiresAt", if (expiry != null) expiry * 1000 else JSONObject.NULL)
+                            .put("reserved", false).put("blocked", false))
+                    }
+                }
+            }
+        }
+
+        // Check for blocked clients in firewall
+        val firewallCfg = uciOf("firewall")
+        val blocked = JSONArray()
+        firewallCfg.keys().forEach { k ->
+            val s = firewallCfg.optJSONObject(k) ?: return@forEach
+            if (s.optString(".type") == "rule" && s.optString("target") == "REJECT" && s.optString("src_mac").isNotEmpty()) {
+                blocked.put(JSONObject().put("section", k).put("mac", s.optString("src_mac"))
+                    .put("label", s.optString("name", s.optString("src_mac"))))
+            }
+        }
+
+        // Mark leases that are reserved or blocked
+        val reservedMacs = mutableSetOf<String>()
+        for (i in 0 until reservations.length()) reservedMacs.add(reservations.optJSONObject(i)?.optString("mac", "")?.lowercase() ?: "")
+        val blockedMacs = mutableSetOf<String>()
+        for (i in 0 until blocked.length()) blockedMacs.add(blocked.optJSONObject(i)?.optString("mac", "")?.lowercase() ?: "")
+        for (i in 0 until leases.length()) {
+            val lease = leases.optJSONObject(i) ?: continue
+            val mac = lease.optString("mac", "").lowercase()
+            if (reservedMacs.contains(mac)) lease.put("reserved", true)
+            if (blockedMacs.contains(mac)) lease.put("blocked", true)
+        }
         
         return ok(JSONObject().put("enabled", lanSec?.optString("ignore") != "1")
             .put("ipv6Enabled", false).put("routerIp", activeRouterIp).put("netmask", "255.255.255.0")
             .put("start", start).put("limit", limit)
             .put("rangeStart", rangeStart).put("rangeEnd", rangeEnd)
             .put("leasetime", lanSec?.optString("leasetime", "12h") ?: "12h")
-            .put("dns", dnsArr).put("reservations", reservations).put("blocked", JSONArray()))
+            .put("dns", dnsArr).put("reservations", reservations)
+            .put("leases", leases).put("leasesAvailable", leasesAvailable)
+            .put("blocked", blocked)
+            .put("managedElsewhere", false)
+            .put("blocking", JSONObject().put("available", true).put("reason", JSONObject.NULL)))
     }
 
     private fun updateDhcp(body: JSONObject): Response {
@@ -861,9 +975,12 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
 
     private fun buildLan(): Response {
         val networkCfg = uciOf("network"); val lanSec = networkCfg.optJSONObject("lan") ?: JSONObject()
+        val mask = lanSec.optString("netmask", "255.255.255.0")
+        val prefix = mask.split(".").sumOf { Integer.bitCount(it.toIntOrNull() ?: 0) }
         return ok(JSONObject().put("ip", lanSec.optString("ipaddr", activeRouterIp))
-            .put("netmask", lanSec.optString("netmask", "255.255.255.0"))
-            .put("gateway", lanSec.optString("gateway", "")))
+            .put("netmask", mask).put("prefix", prefix)
+            .put("gateway", lanSec.optString("gateway", ""))
+            .put("managedElsewhere", false))
     }
 
     private fun updateLan(body: JSONObject): Response {
