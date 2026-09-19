@@ -55,6 +55,13 @@ fun WebViewScreen() {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                // Fix for responsive design:
+                settings.useWideViewPort = true
+                settings.loadWithOverviewMode = true
+                settings.setSupportZoom(false)
+                settings.builtInZoomControls = false
+                settings.displayZoomControls = false
+
                 webViewClient = WebViewClient()
                 loadUrl("http://localhost:8080/")
             }
