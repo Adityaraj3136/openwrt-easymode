@@ -23,6 +23,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -36,6 +37,7 @@ class MainActivity : ComponentActivity() {
     private var webViewRef: WebView? = null
     private var serviceBound = false
     private var boundBinder: EasyModeService.LocalBinder? = null
+    private var serverReady by mutableStateOf(false)
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -43,6 +45,7 @@ class MainActivity : ComponentActivity() {
             serviceBound = true
             // Refresh gateway IP in case network changed before service was ready
             boundBinder?.getServer()?.onNetworkChanged()
+            serverReady = true
         }
         override fun onServiceDisconnected(name: ComponentName) {
             serviceBound = false
@@ -97,7 +100,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    WebViewContainer(onWebViewReady = { wv -> webViewRef = wv })
+                    WebViewContainer(
+                        serverReady = serverReady,
+                        onWebViewReady = { wv -> webViewRef = wv }
+                    )
                 }
             }
         }
@@ -127,8 +133,10 @@ class MainActivity : ComponentActivity() {
 }
 
 @SuppressLint("SetJavaScriptEnabled")
-@androidx.compose.runtime.Composable
-fun WebViewContainer(onWebViewReady: (WebView) -> Unit) {
+@Composable
+fun WebViewContainer(serverReady: Boolean, onWebViewReady: (WebView) -> Unit) {
+    var urlLoaded by remember { mutableStateOf(false) }
+
     AndroidView(
         factory = { context ->
             val webView = WebView(context)
@@ -155,9 +163,14 @@ fun WebViewContainer(onWebViewReady: (WebView) -> Unit) {
             }
 
             onWebViewReady(webView)
-            webView.loadUrl("http://localhost:8080/")
             webView
         },
-        update = { _ -> }
+        update = { webView ->
+            if (serverReady && !urlLoaded) {
+                urlLoaded = true
+                webView.loadUrl("http://localhost:8080/")
+            }
+        }
     )
 }
+
