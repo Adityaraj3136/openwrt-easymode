@@ -7,9 +7,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.os.Binder
-import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 
 /**
  * Foreground service that keeps NanoHTTPD alive even when the app is
@@ -34,11 +34,22 @@ class EasyModeService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIF_ID, buildNotification())
+
+        // Use ServiceCompat.startForeground which handles Android 14+ FOREGROUND_SERVICE_TYPE safely
+        try {
+            ServiceCompat.startForeground(
+                this, NOTIF_ID, buildNotification(),
+                // 0 = no special foreground service type (avoids FOREGROUND_SERVICE_DATA_SYNC requirement)
+                0
+            )
+        } catch (e: Exception) {
+            // Fallback for older API or if notification permission denied
+            startForeground(NOTIF_ID, buildNotification())
+        }
 
         // Start NanoHTTPD server.
-        // NanoHTTPD.DefaultAsyncRunner spawns a new thread per request,
-        // so dashboard polling + Wi-Fi scan run concurrently without queuing.
+        // DefaultAsyncRunner spawns a new thread per request so concurrent
+        // dashboard polls + Wi-Fi scans don't queue behind each other.
         server = EasyModeServer(this, 8080)
         try {
             server?.start(5000, false)  // 5s socket timeout, non-daemon threads
@@ -48,6 +59,10 @@ class EasyModeService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Handle network-change signal from MainActivity's BroadcastReceiver
+        if (intent?.getStringExtra("action") == "network_changed") {
+            server?.onNetworkChanged()
+        }
         // START_STICKY: Android restarts the service if it gets killed
         return START_STICKY
     }
@@ -71,8 +86,8 @@ class EasyModeService : Service() {
             .setContentText("Router management server running")
             .setSmallIcon(android.R.drawable.ic_menu_manage)
             .setContentIntent(openIntent)
-            .setOngoing(true)           // Cannot be dismissed by swipe
-            .setSilent(true)            // No sound/vibration
+            .setOngoing(true)
+            .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
@@ -86,7 +101,6 @@ class EasyModeService : Service() {
             description = "Keeps the EasyMode router management server running in the background"
             setShowBadge(false)
         }
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(channel)
+        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 }

@@ -1,7 +1,6 @@
 package com.example.easymode
 
 import android.content.Context
-import android.net.wifi.WifiManager
 import fi.iki.elonen.NanoHTTPD
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -49,8 +48,22 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     // ── Gateway IP detection ──────────────────────────────────
     private fun getGatewayIp(): String {
         return try {
-            @Suppress("DEPRECATION")
-            val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val cm = context.applicationContext
+                .getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val network = cm.activeNetwork ?: return tryDhcpFallback()
+            val props = cm.getLinkProperties(network) ?: return tryDhcpFallback()
+            // Find the default IPv4 route's gateway
+            val gw = props.routes
+                .firstOrNull { it.isDefaultRoute && it.gateway?.hostAddress?.contains('.') == true }
+                ?.gateway?.hostAddress
+            if (!gw.isNullOrEmpty()) gw else tryDhcpFallback()
+        } catch (_: Exception) { tryDhcpFallback() }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun tryDhcpFallback(): String {
+        return try {
+            val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
             val g = wm.dhcpInfo.gateway
             if (g != 0) {
                 val b = byteArrayOf((g and 0xFF).toByte(), ((g shr 8) and 0xFF).toByte(),
@@ -226,7 +239,7 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             return unblockClient(uri.removePrefix("/api/dhcp/blocked/"))
 
         // ── Mode switching ───────────────────────────────────────
-        if (uri == \"/api/mode\") return ok(buildModeOverview())
+        if (uri == "/api/mode") return ok(buildModeOverview())
         if (uri == "/api/mode/router" && method == Method.POST) return switchToRouter(body)
         if (uri == "/api/mode/ap" && method == Method.POST) return switchToAP(body)
         if (uri == "/api/mode/repeater" && method == Method.POST) return switchToRepeater(body)
