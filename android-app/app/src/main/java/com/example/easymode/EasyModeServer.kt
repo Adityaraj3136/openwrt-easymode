@@ -301,7 +301,7 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             .put("autoReboot", JSONObject.NULL).put("memory", mem).put("cpu", cpu)
             .put("load", loadList ?: JSONObject.NULL)
         val wanUp = network.optJSONObject("wan")?.optBoolean("up", false) ?: false
-        val internet = JSONObject().put("connected", wanUp).put("reachable", wanUp)
+        val internet = JSONObject().put("online", wanUp)
         val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
         return ok(JSONObject().put("fetchedAt", sdf.format(Date()))
             .put("router", JSONObject().put("host", activeRouterIp).put("username", "root")
@@ -622,6 +622,12 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 .put("channel", s.opt("channel") ?: info?.opt("channel"))
                 .put("clients", clients)
                 .put("interfaces", interfaces)
+                .put("capabilities", JSONObject()
+                    .put("supports", JSONObject().put("channel", false).put("txpower", false))
+                    .put("widthOptions", JSONArray())
+                    .put("channels", JSONArray())
+                    .put("txpower", JSONObject().put("min", 0).put("max", 0))
+                )
 
             if (detailed) {
                 radioObj.put("txpower", s.opt("txpower") ?: info?.opt("txpower"))
@@ -663,7 +669,19 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
 
     private fun buildWifiScan(radioId: String?): Response {
         val radio = radioId ?: firstRadioId() ?: return ok(JSONObject().put("networks", JSONArray()).put("joinable", JSONObject()).put("congestion", JSONObject()))
-        val scan = tryCall("iwinfo", "scan", JSONObject().put("device", radio))
+        
+        val netWireless = tryCall("network.wireless", "status") ?: JSONObject()
+        var scanDevice = radio
+        val radioObj = netWireless.optJSONObject(radio)
+        if (radioObj != null) {
+            val ifaces = radioObj.optJSONArray("interfaces")
+            if (ifaces != null && ifaces.length() > 0) {
+                val ifname = ifaces.optJSONObject(0)?.optString("ifname", "") ?: ""
+                if (ifname.isNotEmpty()) scanDevice = ifname
+            }
+        }
+        
+        val scan = tryCall("iwinfo", "scan", JSONObject().put("device", scanDevice))
         val networks = JSONArray()
         scan?.optJSONArray("results")?.let { results ->
             for (i in 0 until results.length()) {
@@ -736,13 +754,11 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 reservations.put(JSONObject().put("section", k).put("mac", s.optString("mac"))
                     .put("ip", s.optString("ip")).put("name", s.optString("name", "")))
         }
-        // DNS: UCI stores as a list — may be JSONArray or space-separated string
         val dnsArr = JSONArray()
         lanSec?.let { sec ->
             when (val raw = sec.opt("dhcp_option") ?: sec.opt("dns")) {
                 is JSONArray -> for (i in 0 until raw.length()) {
                     val entry = raw.optString(i)
-                    // dhcp_option format: "6,1.1.1.1,8.8.8.8"
                     if (entry.startsWith("6,")) entry.removePrefix("6,").split(",").forEach { dnsArr.put(it.trim()) }
                     else if (entry.isNotEmpty()) dnsArr.put(entry.trim())
                 }
@@ -750,9 +766,16 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 else -> Unit
             }
         }
+        val start = lanSec?.optInt("start", 100) ?: 100
+        val limit = lanSec?.optInt("limit", 150) ?: 150
+        val prefix = activeRouterIp.substringBeforeLast('.')
+        val rangeStart = "$prefix.$start"
+        val rangeEnd = "$prefix.${start + limit - 1}"
+        
         return ok(JSONObject().put("enabled", lanSec?.optString("ignore") != "1")
             .put("ipv6Enabled", false).put("routerIp", activeRouterIp).put("netmask", "255.255.255.0")
-            .put("start", lanSec?.optInt("start", 100) ?: 100).put("limit", lanSec?.optInt("limit", 150) ?: 150)
+            .put("start", start).put("limit", limit)
+            .put("rangeStart", rangeStart).put("rangeEnd", rangeEnd)
             .put("leasetime", lanSec?.optString("leasetime", "12h") ?: "12h")
             .put("dns", dnsArr).put("reservations", reservations).put("blocked", JSONArray()))
     }
