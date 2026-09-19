@@ -301,7 +301,18 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             .put("autoReboot", JSONObject.NULL).put("memory", mem).put("cpu", cpu)
             .put("load", loadList ?: JSONObject.NULL)
         val wanUp = network.optJSONObject("wan")?.optBoolean("up", false) ?: false
-        val internet = JSONObject().put("online", wanUp)
+        // Attempt a real connectivity test if WAN is up
+        val internetOnline = if (wanUp) {
+            val pingResult = tryCall("file", "exec", JSONObject()
+                .put("command", "/bin/ping")
+                .put("params", JSONArray().put("-c").put("1").put("-W").put("2").put("8.8.8.8")))
+            val exitCode = pingResult?.optInt("code", 1) ?: 1
+            if (exitCode == 0) true else {
+                // Fallback: WAN is up, we just can't verify
+                null
+            }
+        } else false
+        val internet = JSONObject().put("online", internetOnline).put("method", if (internetOnline == true) "ping" else "settings")
         val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
         return ok(JSONObject().put("fetchedAt", sdf.format(Date()))
             .put("router", JSONObject().put("host", activeRouterIp).put("username", "root")
@@ -428,9 +439,27 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             }
         }
 
+        // Compute CIDR and gateway for dashboard home-network panel
+        val lanIpStr = ipv4(lanIface)
+        val lanDevice = lanIface?.optString("l3_device") ?: lanIface?.optString("device")
+        val lanRoutes = lanIface?.optJSONArray("route") ?: JSONArray()
+        var lanGateway: String? = null
+        for (r in 0 until lanRoutes.length()) {
+            val route = lanRoutes.optJSONObject(r) ?: continue
+            if (route.optString("target") == "0.0.0.0") {
+                lanGateway = route.optString("nexthop", null)
+                break
+            }
+        }
+        val lanPrefix = lanIface?.optJSONArray("ipv4-address")?.let {
+            if (it.length() > 0) it.getJSONObject(0).optInt("mask", 24) else 24
+        } ?: 24
+        val cidr = if (lanIpStr != null) "$lanIpStr/$lanPrefix" else null
+
         val lan = JSONObject()
             .put("present", lanIface != null).put("up", lanIface?.optBoolean("up") ?: false)
-            .put("ip", ipv4(lanIface)).put("device", lanIface?.optString("l3_device") ?: lanIface?.optString("device"))
+            .put("ip", lanIpStr).put("device", lanDevice)
+            .put("cidr", cidr).put("gateway", lanGateway)
             .put("dhcpEnabled", dhcpEnabled)
             .put("clients", JSONObject()
                 .put("count", if (available) clientDevices.length() else JSONObject.NULL)
@@ -439,12 +468,31 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 .put("available", available)
                 .put("reason", reason)
                 .put("devices", clientDevices))
+        // Extract WAN gateway and DNS
+        val wanRoutes = wanIface?.optJSONArray("route") ?: JSONArray()
+        var wanGateway: String? = null
+        for (r in 0 until wanRoutes.length()) {
+            val route = wanRoutes.optJSONObject(r) ?: continue
+            if (route.optString("target") == "0.0.0.0") {
+                wanGateway = route.optString("nexthop", null)
+                break
+            }
+        }
+        val wanDns = JSONArray()
+        val dnsServers = wanIface?.optJSONArray("dns-server")
+        if (dnsServers != null) {
+            for (i in 0 until dnsServers.length()) wanDns.put(dnsServers.optString(i))
+        }
+        val wanDeviceObj = devices.optJSONObject(wanDevice ?: "")
+        val wanCarrier = wanDeviceObj?.let { if (it.has("carrier")) it.optBoolean("carrier") else null }
+
         val wan = JSONObject()
             .put("present", wanIface != null).put("up", wanIface?.optBoolean("up") ?: false)
             .put("interface", wanIface?.optString("interface"))
             .put("kind", if (wanIface == null) "none" else if (wanIsWireless) "wireless" else "ethernet")
             .put("proto", wanIface?.optString("proto")).put("device", wanDevice)
             .put("ip", ipv4(wanIface)).put("uptimeSeconds", wanIface?.optLong("uptime", 0) ?: 0)
+            .put("gateway", wanGateway).put("dns", wanDns).put("carrier", wanCarrier)
         return JSONObject().put("wan", wan).put("lan", lan).put("ethernetLinks", eth)
     }
 
@@ -540,7 +588,7 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     // Wi-Fi
     // ═══════════════════════════════════════════════════════════
     private fun buildWifiSummary(): JSONObject {
-        val radios = buildRadiosArray(false)
+        val radios = buildRadiosArray(true)
         return JSONObject().put("supported", radios.length() > 0).put("repeaterPaused", false).put("radios", radios)
     }
 
@@ -602,10 +650,12 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                         .put("ifname", realIfname)
                         .put("mode", mode)
                         .put("ssid", ssid)
+                        .put("key", iface.optString("key", null))
                         .put("network", netList)
                         .put("encryption", iface.optString("encryption", "none"))
                         .put("disabled", iface.optString("disabled", "0") == "1")
                         .put("hidden", iface.optString("hidden", "0") == "1")
+                        .put("isolate", iface.optString("isolate", "0") == "1")
                     )
                 }
             }
@@ -620,6 +670,7 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 .put("enabled", s.optString("disabled") != "1")
                 .put("ssid", primarySsid)
                 .put("channel", s.opt("channel") ?: info?.opt("channel"))
+                .put("channelConfig", s.optString("channel", "auto"))
                 .put("clients", clients)
                 .put("interfaces", interfaces)
                 .put("capabilities", JSONObject()
@@ -713,15 +764,18 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         if (body.has("enabled")) deviceValues.put("disabled", if (body.optBoolean("enabled")) "0" else "1")
         if (deviceValues.length() > 0) uciSet("wireless", radioId, deviceValues)
 
-        // Update AP interface: ssid, password, enabled
+        // Update AP interface: ssid, key, encryption, hidden, isolate, enabled
         wireless.keys().forEach { k ->
             val s = wireless.optJSONObject(k) ?: return@forEach
             if (s.optString(".type") != "wifi-iface" || s.optString("device") != radioId || s.optString("mode") != "ap") return@forEach
             val ifaceValues = JSONObject()
             if (body.has("ssid")) ifaceValues.put("ssid", body.getString("ssid"))
-            if (body.has("password") && body.optString("password").isNotEmpty()) {
-                ifaceValues.put("key", body.getString("password")); ifaceValues.put("encryption", "psk2")
+            if (body.has("encryption")) ifaceValues.put("encryption", body.optString("encryption"))
+            if (body.has("key") && body.optString("key").isNotEmpty()) {
+                ifaceValues.put("key", body.getString("key"))
             }
+            if (body.has("hidden")) ifaceValues.put("hidden", if (body.optBoolean("hidden")) "1" else "0")
+            if (body.has("isolate")) ifaceValues.put("isolate", if (body.optBoolean("isolate")) "1" else "0")
             if (body.has("enabled")) ifaceValues.put("disabled", if (body.optBoolean("enabled")) "0" else "1")
             if (ifaceValues.length() > 0) uciSet("wireless", k, ifaceValues)
         }
