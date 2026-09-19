@@ -88,7 +88,16 @@ export const sortScanResults = (merged) =>
  */
 export async function scanNetworks(client, radioId, session = null) {
   const device = await scanDevice(client, radioId);
-  const result = await client.tryCall('iwinfo', 'scan', { device }, null);
+  let result;
+  try {
+    result = await client.call('iwinfo', 'scan', { device });
+  } catch (err) {
+    if (err.code === 'ROUTER_UNREACHABLE' || err.status === 502) {
+      throw new AppError('SCAN_FAILED', `Cannot scan on ${radioId} right now. If your phone or computer is connected to this Wi-Fi band, the router cannot scan it simultaneously. Try connecting to the other band to scan.`, { status: 502 });
+    }
+    throw err;
+  }
+  
   if (!result) {
     throw new AppError('SCAN_FAILED', 'The router could not search for Wi-Fi networks.', { status: 502 });
   }

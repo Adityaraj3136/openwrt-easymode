@@ -80,7 +80,8 @@ function topology({ mode, network, internet, wifi, bandwidth }) {
     el('span', { class: 'topo-sub', text: network.lan.ip ?? dash }),
   ]);
 
-  const branchLink = el('div', { class: 'topo-link' }, [el('div', { class: 'topo-wire live' })]);
+  const paused = wifi?.repeaterPaused === true;
+  const branchLink = el('div', { class: 'topo-link' }, [el('div', { class: `topo-wire ${paused ? 'down' : 'live'}` })]);
 
   const branch = el('div', { class: 'topo-branch' }, [
     el('div', { class: 'topo-node' }, [
@@ -225,7 +226,7 @@ function healthPanel(system) {
 /* ============================================================
    Level 3 — Wi-Fi and devices
    ============================================================ */
-function wifiPanel(wifi, handlers) {
+function wifiPanel(wifi, handlers, repeaterPaused) {
   if (!wifi.supported) {
     return panel({ icon: icon('wifi', { size: 19 }), title: 'Wi-Fi' }, [
       el('p', { class: 'empty', text: 'This router has no wireless radios.' }),
@@ -238,16 +239,63 @@ function wifiPanel(wifi, handlers) {
 
     if (mode === 'sta' || mode === 'repeater') {
       const onManageMode = () => handlers.onModeSetup?.(radio.id);
+      
+      const isConnected = sta?.up && !repeaterPaused;
+      
+      const statusBadge = repeaterPaused
+        ? badge('Disconnected', 'warning')
+        : radio.enabled 
+          ? (isConnected ? badge('Connected', 'ok') : badge('Connecting...', 'warning'))
+          : badge('Off', 'neutral');
+
+      const toggleBtn = el('button', { 
+        class: 'btn btn-ghost btn-small', 
+        onclick: async () => {
+          let confirmed = repeaterPaused;
+          if (!confirmed) {
+            const { confirmDialog } = await import('../components.js');
+            confirmed = await confirmDialog({
+              title: 'Disconnect from this network?',
+              message: 'Internet access will be paused for all devices.',
+              confirmLabel: 'Disconnect',
+              tone: 'danger'
+            });
+          }
+
+          if (confirmed) {
+            toggleBtn.disabled = true;
+            toggleBtn.textContent = repeaterPaused ? 'Connecting...' : 'Disconnecting...';
+            try {
+              if (repeaterPaused) {
+                await api.connectRepeater();
+              } else {
+                await api.disconnectRepeater();
+              }
+              
+              setTimeout(() => location.reload(), 1500);
+            } catch (e) {
+              alert('Failed: ' + e.message);
+              toggleBtn.disabled = false;
+              toggleBtn.textContent = repeaterPaused ? 'Connect' : 'Disconnect';
+            }
+          }
+        }, 
+        text: repeaterPaused ? 'Connect' : 'Disconnect' 
+      });
+
       return el('div', { class: 'band' }, [
         el('div', { class: 'band-head' }, [
           icon('globe', { size: 17 }),
           el('strong', { text: 'Repeater' }),
           el('span', { style: 'flex:1' }),
-          badge(radio.enabled ? 'Active' : 'Off', radio.enabled ? 'ok' : 'neutral'),
+          statusBadge,
         ]),
-        el('div', { class: 'ssid', text: radio.ssid ?? 'Unknown network' }),
-        el('div', { class: 'meta', text: 'Providing internet to your router' }),
-        el('button', { class: 'btn btn-ghost btn-small', onclick: onManageMode, text: 'Manage' }),
+        el('div', { class: 'ssid', text: sta?.ssid ?? 'Unknown network' }),
+        el('div', { class: 'meta', text: repeaterPaused ? 'Internet disconnected — click Connect to resume' : (isConnected ? 'Providing internet to your router' : 'Trying to connect or out of range') }),
+        el('div', { style: 'display:flex; gap:8px; margin-top:12px;' }, [
+          el('button', { class: 'btn btn-ghost btn-small', onclick: onManageMode, text: 'Manage' }),
+          toggleBtn
+        ])
       ]);
     }
 
@@ -402,7 +450,7 @@ function render(container, { status, bandwidth, dhcp }, handlers) {
     ]),
     el('div', { style: 'height:16px' }),
     el('div', { class: 'grid halves' }, [
-      wifiPanel(status.wifi, handlers),
+      wifiPanel(status.wifi, handlers, status.wifi?.repeaterPaused),
       devicesPanel(status.network, status.wifi, dhcp?.leases ?? [], handlers.onViewDevices),
     ]),
     el('div', { style: 'height:16px' }),

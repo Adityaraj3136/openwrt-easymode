@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { channelCongestion } from '../lib/derive.js';
 import { AppError } from '../lib/errors.js';
+import { isInternetPaused } from '../lib/repeater-state.js';
 import { applyRadioSettings, parseRadioSettings, radioCapabilities } from '../lib/wifi-config.js';
 import { byNetworkName, scanNetworks } from '../lib/wifi-scan.js';
 import { listRadios } from '../lib/wireless.js';
@@ -40,10 +41,10 @@ wifiRouter.get(
           : null;
         return { ...iface, key: uciSection?.key ?? null };
       });
-
       detailed.push({ ...radio, interfaces: enrichedInterfaces, capabilities });
     }
-    res.json({ radios: detailed, supported: detailed.length > 0 });
+    const repeaterPaused = await isInternetPaused(req.ubus);
+    res.json({ radios: detailed, supported: detailed.length > 0, repeaterPaused });
   }),
 );
 
@@ -107,6 +108,130 @@ wifiRouter.post(
       settings,
     });
     res.json(result);
+  }),
+);
+
+/** Scan-based channel optimization: find the least congested channel and apply it. */
+wifiRouter.post(
+  '/wifi/optimize/:id',
+  asyncHandler(async (req, res) => {
+    const { optimizeChannel } = await import('../lib/wifi-config.js');
+    const radioId = String(req.params.id);
+
+    console.log('[optimize debug] Session ACLs:', JSON.stringify(req.session.acls, null, 2));
+
+    try {
+      const objects = await req.ubus.listObjects();
+      console.log('[optimize debug] Available UBUS Objects:', Object.keys(objects || {}).join(', '));
+      console.log('[optimize debug] luci methods:', objects['luci'] || 'none');
+      console.log('[optimize debug] luci-rpc methods:', objects['luci-rpc'] || 'none');
+      console.log('[optimize debug] rpc-sys methods:', objects['rpc-sys'] || 'none');
+    } catch (e) {
+      console.log('[optimize debug] listObjects FAILED:', e.message);
+    }
+
+    try {
+      const wconfig = await req.ubus.call('file', 'read', { path: '/etc/config/wireless' });
+      console.log('[optimize debug] wireless config:\n', wconfig.data.substring(0, 500));
+    } catch (e) {
+      console.log('[optimize debug] read wireless config FAILED:', e.message);
+    }
+
+    // Step 1: scan and find the best channel.
+    const analysis = await optimizeChannel(req.ubus, radioId, req.session);
+
+    // Step 2: apply the chosen channel.
+    const capabilities = await radioCapabilities(req.ubus, radioId);
+    const settings = parseRadioSettings({ channel: analysis.channel }, capabilities);
+    const result = await applyRadioSettings({
+      client: req.ubus,
+      session: req.session,
+      radioId,
+      settings,
+    });
+
+    res.json({
+      ...result,
+      optimized: true,
+      channel: Number(analysis.channel),
+      reason: analysis.reason,
+      scores: analysis.scores,
+      networksScanned: analysis.networks,
+    });
+  }),
+);
+
+wifiRouter.post(
+  '/wifi/repeater/disconnect',
+  asyncHandler(async (req, res) => {
+    const { Uci } = await import('../lib/uci.js');
+    const uci = new Uci(req.ubus);
+    
+    // Find or create the pause-internet rule
+    const firewall = await req.ubus.uciGet('firewall');
+    let ruleName = 'pause_internet';
+    
+    // Check if it exists by name or internal ID
+    const existing = Object.entries(firewall || {}).find(([k, v]) => v['.type'] === 'rule' && (v.name === 'pause-internet' || k === 'pause_internet'));
+    if (existing) {
+      ruleName = existing[0];
+    } else {
+      // Ensure it exists (signature: config, section, type, values)
+      await uci.ensure('firewall', ruleName, 'rule', {
+        name: 'pause-internet',
+        src: 'lan',
+        dest: 'wan',
+        proto: 'all',
+        target: 'REJECT'
+      });
+    }
+    
+    await uci.set('firewall', ruleName, { enabled: '1', proto: 'all' });
+    await req.ubus.tryCall('uci', 'commit', { config: 'firewall' });
+    
+    // Apply changes (no service restart)
+    try {
+      await req.ubus.call('uci', 'apply', { timeout: 10, rollback: false });
+    } catch {
+      await req.ubus.tryCall('firewall', 'reload', {});
+    }
+
+    res.json({ success: true, paused: true });
+  }),
+);
+
+wifiRouter.post(
+  '/wifi/repeater/connect',
+  asyncHandler(async (req, res) => {
+    const { Uci } = await import('../lib/uci.js');
+    const uci = new Uci(req.ubus);
+    
+    const firewall = await req.ubus.uciGet('firewall');
+    let ruleName = 'pause_internet';
+    
+    const existing = Object.entries(firewall || {}).find(([k, v]) => v['.type'] === 'rule' && (v.name === 'pause-internet' || k === 'pause_internet'));
+    if (existing) {
+      ruleName = existing[0];
+    } else {
+      await uci.ensure('firewall', ruleName, 'rule', {
+        name: 'pause-internet',
+        src: 'lan',
+        dest: 'wan',
+        proto: 'all',
+        target: 'REJECT'
+      });
+    }
+    
+    await uci.set('firewall', ruleName, { enabled: '0', proto: 'all' });
+    await req.ubus.tryCall('uci', 'commit', { config: 'firewall' });
+    
+    try {
+      await req.ubus.call('uci', 'apply', { timeout: 10, rollback: false });
+    } catch {
+      await req.ubus.tryCall('firewall', 'reload', {});
+    }
+
+    res.json({ success: true, paused: false });
   }),
 );
 

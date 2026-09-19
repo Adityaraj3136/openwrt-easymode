@@ -84,10 +84,21 @@ export async function getStaState(client, radioId) {
   };
 }
 
-async function waitForAssociation(client, radioId, { attempts = 10, delayMs = 3000 } = {}) {
+async function waitForAssociation(client, radioId, { attempts = 15, delayMs = 3000 } = {}) {
+  // After commitAll() fires the cron, the router runs 'wifi down && wifi up && network restart'.
+  // This briefly kills our connection to the router (PC loses WiFi while AP is down).
+  // Sleep upfront to let WiFi come back before we start polling.
+  await sleep(8000);
+
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const state = await getStaState(client, radioId);
-    if (state.associated) return state;
+    try {
+      const state = await getStaState(client, radioId);
+      if (state.associated) return state;
+    } catch (err) {
+      // ROUTER_UNREACHABLE = PC is still reconnecting to the router's AP.
+      // Keep waiting — don't crash.
+      if (err.code !== 'ROUTER_UNREACHABLE') throw err;
+    }
     await sleep(delayMs);
   }
   return null;
@@ -126,9 +137,31 @@ async function connectUplink(ctx) {
   // A radio carrying both the uplink and the local Wi-Fi must follow the upstream channel.
   await uci.set('wireless', options.radio, { disabled: '0', channel: 'auto' });
   await uci.ensure('network', UPLINK_NETWORK, 'interface', { proto: 'dhcp' });
+  
+  // Enable IPv6 client on the uplink interface if requested
+  if (options.ipv6 !== false) {
+    await uci.ensure('network', UPLINK_NETWORK + '6', 'interface', { 
+      device: `@${UPLINK_NETWORK}`, 
+      proto: 'dhcpv6', 
+      reqaddress: 'try', 
+      reqprefix: 'auto' 
+    });
+  } else {
+    // If explicitly disabled during setup, remove it if it exists
+    await uci.delete('network', UPLINK_NETWORK + '6');
+  }
 
-  await uci.apply(60);
-  await uci.confirm();
+  try {
+    await uci.apply(60);
+    await uci.confirm();
+  } catch (applyErr) {
+    if (String(applyErr?.message).includes('NO_DATA') || applyErr?.code === 'ROUTER_ERROR') {
+      console.log('[wireless-uplink] apply/confirm got NO_DATA, falling back to commitAll');
+      try { await uci.commitAll(); } catch (e) { console.log('[wireless-uplink] commitAll also failed, continuing:', e.message); }
+    } else {
+      throw applyErr;
+    }
+  }
   // Live from here on: if anything below fails, recovery must restore, not just revert.
   ctx.noteInterimApply();
 
@@ -207,7 +240,8 @@ export function createWirelessUplinkPlan({ mode, label, sourceNoun }) {
       }
       await uci.clearOptions('network', 'lan', ['gateway', 'dns']);
 
-      await uci.set('network', 'lan', { proto: 'static', ipaddr: lanIp, netmask: lanNetmask });
+      // Pure IPv4 mode: disable kernel IPv6 on LAN to break any cached client IPv6
+      await uci.set('network', 'lan', { proto: 'static', ipaddr: lanIp, netmask: lanNetmask, ipv6: '0' });
       if (lanIp !== ctx.session.host) ctx.facts.newLanIp = lanIp;
       ctx.facts.lanIp = lanIp;
 
@@ -220,13 +254,27 @@ export function createWirelessUplinkPlan({ mode, label, sourceNoun }) {
         limit: lanDhcp?.section.limit ?? '150',
         leasetime: lanDhcp?.section.leasetime ?? '12h',
         ignore: '0',
+        dhcpv6: 'disabled',
+        ra: 'disabled',
+        ndp: 'disabled'
       };
+
       if (lanDhcp) await uci.set('dhcp', lanDhcp.name, dhcpValues);
       else await uci.ensure('dhcp', 'lan', 'dhcp', dhcpValues);
+
+      // Disable kernel IPv6 on the STA interface entirely.
+      // Without this, the kernel still processes Airtel's RAs on phy0-sta0 and
+      // leaks IPv6 to 2.4GHz LAN clients via the shared radio.
+      await uci.set('network', UPLINK_NETWORK, { ipv6: '0' });
+      // Remove any relay configuration
+      await uci.delete('dhcp', 'wwan');
 
       // Internet sharing: the wireless uplink is treated exactly like a WAN port.
       const firewall = (await client.uciGet('firewall')) ?? {};
       const wanZone = findSection(firewall, 'zone', (section) => section.name === 'wan');
+      const networks = [UPLINK_NETWORK];
+      if (options.ipv6 !== false) networks.push(UPLINK_NETWORK + '6');
+      
       if (wanZone) {
         await uci.set('firewall', wanZone.name, {
           masq: '1',
@@ -234,7 +282,7 @@ export function createWirelessUplinkPlan({ mode, label, sourceNoun }) {
           input: 'REJECT',
           output: 'ACCEPT',
           forward: 'REJECT',
-          network: [...new Set([...asList(wanZone.section.network), UPLINK_NETWORK])],
+          network: [...new Set([...asList(wanZone.section.network), ...networks])],
         });
       } else {
         await uci.add('firewall', 'zone', {
@@ -244,7 +292,7 @@ export function createWirelessUplinkPlan({ mode, label, sourceNoun }) {
           forward: 'REJECT',
           masq: '1',
           mtu_fix: '1',
-          network: [UPLINK_NETWORK],
+          network: networks,
         });
       }
 

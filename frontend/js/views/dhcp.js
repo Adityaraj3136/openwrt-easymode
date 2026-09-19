@@ -146,6 +146,13 @@ function serverPanel(status, { onSaved, onUnauthorized }) {
     hint: locked ? 'Your main router is handing out addresses.' : 'Gives your devices an address automatically.',
   });
 
+  const ipv6Enabled = toggle({
+    checked: status.ipv6Enabled,
+    disabled: locked,
+    label: 'IPv6 support',
+    hint: locked ? 'Managed by main router.' : 'Assigns IPv6 addresses and routing to devices.',
+  });
+
   const inputs = {
     start: el('input', { type: 'number', min: 2, max: 254, value: status.start, disabled: locked || false }),
     limit: el('input', { type: 'number', min: 1, max: 253, value: status.limit, disabled: locked || false }),
@@ -157,12 +164,14 @@ function serverPanel(status, { onSaved, onUnauthorized }) {
   const save = el('button', { class: 'btn btn-primary', disabled: locked || false }, ['Save changes']);
 
   save.addEventListener('click', async () => {
+    console.log('DHCP_TOGGLE_V2_LOADED');
     clear(errorSlot);
     save.disabled = true;
-    save.textContent = 'Saving…';
+    save.textContent = 'Saving...';
     try {
       await api.updateDhcp({
         enabled: enabled.input.checked,
+        ipv6: false, // Hardcoded to false for pure IPv4 operation
         start: Number(inputs.start.value),
         limit: Number(inputs.limit.value),
         leasetime: inputs.leasetime.value,
@@ -197,6 +206,7 @@ function serverPanel(status, { onSaved, onUnauthorized }) {
           ])
         : null,
       enabled,
+      // IPv6 removed for pure IPv4 mode
       el('div', { style: 'height:18px' }),
       el('div', { class: 'stat-row' }, [
         el('div', { class: 'stat' }, [

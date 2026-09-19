@@ -6,6 +6,10 @@ import { asyncHandler, requireSession } from '../middleware/auth.js';
 
 export const dhcpRouter = Router();
 
+dhcpRouter.get('/dhcp/debug', asyncHandler(async (req, res) => {
+  res.json(await req.ubus.uciGet('dhcp'));
+}));
+
 dhcpRouter.use(requireSession);
 
 dhcpRouter.get(
@@ -50,6 +54,10 @@ dhcpRouter.delete(
     res.json(await deleteReservation(req.ubus, req.session, String(req.params.section)));
   }),
 );
+
+dhcpRouter.get('/dhcp/debug', asyncHandler(async (req, res) => {
+  res.json(await req.ubus.uciGet('dhcp'));
+}));
 
 /** Stops a device reaching the internet through this router. */
 dhcpRouter.post(

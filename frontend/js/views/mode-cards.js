@@ -78,19 +78,64 @@ function visual(parts) {
 }
 
 /** One card in the 2x2 chooser. */
-export function modeCard(mode, { current, available, onSelect }) {
-  const action = available
+export function modeCard(mode, { current, available, onSelect, uplink }) {
+  const actionContainer = el('div', { style: 'display:flex; gap:8px;' });
+
+  const mainAction = available
     ? el('button', {
         class: current ? 'btn btn-ghost' : 'btn btn-primary',
+        style: current ? 'flex:1' : 'width:100%',
         onclick: () => onSelect(mode.id),
         text: current ? 'Edit setup' : mode.action,
       })
-    : el('button', { class: 'btn btn-ghost', disabled: true, text: 'Not available on this router' });
+    : el('button', { class: 'btn btn-ghost', style: 'width:100%', disabled: true, text: 'Not available on this router' });
+    
+  actionContainer.append(mainAction);
+
+  if (current && (mode.id === 'repeater' || mode.id === 'hotspot')) {
+    const isPaused = uplink?.paused;
+    const toggleBtn = el('button', {
+      class: 'btn btn-ghost',
+      style: `color: ${isPaused ? 'var(--c-ok)' : 'var(--c-bad)'}; flex: 1;`,
+      onclick: async () => {
+        let confirmed = isPaused;
+        if (!confirmed) {
+          const { confirmDialog } = await import('../components.js');
+          confirmed = await confirmDialog({
+            title: 'Disconnect from this network?',
+            message: 'Internet access will be paused for all devices.',
+            confirmLabel: 'Disconnect',
+            tone: 'danger'
+          });
+        }
+        
+        if (confirmed) {
+          toggleBtn.disabled = true;
+          toggleBtn.textContent = isPaused ? 'Connecting...' : 'Disconnecting...';
+          try {
+            const { api } = await import('../api.js');
+            if (isPaused) {
+              await api.connectRepeater();
+            } else {
+              await api.disconnectRepeater();
+            }
+            setTimeout(() => location.reload(), 1500);
+          } catch (e) {
+            alert(`Failed: ` + e.message);
+            toggleBtn.disabled = false;
+            toggleBtn.textContent = isPaused ? 'Connect' : 'Disconnect';
+          }
+        }
+      },
+      text: isPaused ? 'Connect' : 'Disconnect'
+    });
+    actionContainer.append(toggleBtn);
+  }
 
   return el('section', { class: `card hoverable mode-card-new${current ? ' current' : ''}` }, [
     current ? badge('Current', 'accent', { dot: false }) : null,
     visual(mode.visual),
     el('div', {}, [el('h3', { text: mode.title }), el('p', { text: mode.blurb })]),
-    action,
+    actionContainer,
   ]);
 }

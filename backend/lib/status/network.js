@@ -221,7 +221,7 @@ export async function getNetworkStatus(client, session) {
       hostname: lease?.hostname ?? null,
       wired: !wifiMacs.has(mac),
     };
-  });
+  }).filter((d) => d.ip);
 
   const wiredCount = connectedDevices.filter((d) => d.wired).length;
   const wirelessCount = connectedDevices.filter((d) => !d.wired).length;

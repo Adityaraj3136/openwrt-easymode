@@ -12,9 +12,10 @@ export async function getDashboard(client, session) {
   ]);
 
   const radios = session.capabilities?.features?.wirelessControl ? await listRadios(client) : [];
-  const [internet, mode] = await Promise.all([
+  const [internet, mode, repeaterPaused] = await Promise.all([
     checkInternet(client, network),
     getModeStatus(client, { network, radios }),
+    import('../repeater-state.js').then(m => m.isInternetPaused(client)),
   ]);
 
   delete network._raw;
@@ -29,8 +30,10 @@ export async function getDashboard(client, session) {
     system,
     network,
     internet,
+    mode,
     wifi: {
       supported: radios.length > 0,
+      repeaterPaused,
       radios: radios.map((radio) => ({
         id: radio.id,
         band: radio.band,

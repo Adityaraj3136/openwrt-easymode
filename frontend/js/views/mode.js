@@ -164,6 +164,7 @@ function routerSteps(state, overview) {
     ssid: el('input', { value: state.wifiSsid ?? overview.defaults.wifiSsid ?? '' }),
     key: el('input', { type: 'password', value: state.wifiKey ?? overview.defaults.wifiKey ?? '', placeholder: 'At least 8 characters' }),
     macaddr: el('input', { placeholder: '00:11:22:33:44:55', value: state.macaddr ?? '' }),
+    ipv6: toggle({ checked: state.ipv6 !== false, label: 'Enable IPv6', hint: 'Keep this on if your provider supports IPv6.' }),
   };
 
   const CONNECTIONS = [
@@ -209,19 +210,26 @@ function routerSteps(state, overview) {
           stepHero('cable', 'How does the internet reach this router?', 'Plug the cable from your modem or main router into the internet (WAN) port.'),
           preflight.ready
             ? el('div', { style: 'margin-bottom:16px' }, [badge('Cable detected in the internet port', 'ok')])
-            : el('div', { class: 'alert' }, [
+            : el('div', { class: 'alert alert-warning' }, [
                 icon('alert', { size: 18 }),
-                el('div', {}, [el('span', { text: preflight.reason ?? 'No cable detected.' })]),
+                el('div', {}, [el('span', { text: preflight.reason ?? 'No cable detected in the internet port. You can still set up the router now and plug it in later.' })]),
               ]),
           choices,
           pppoeBox,
           staticBox,
           advanced('Advanced settings', [
+            // IPv6 removed for pure IPv4 mode
+            // inputs.ipv6,
+            // el('div', { style: 'height:12px' }),
             field('MAC address clone', inputs.macaddr, 'Optional. Use when your ISP locks your connection to a specific device.'),
           ]),
         ]);
       },
       commit() {
+        // state.connection is updated by the change listener, but if it was never changed,
+        // it might be undefined. Default it to 'auto' if so.
+        if (!state.connection) state.connection = 'auto';
+        state.ipv6 = false; // Hardcoded to false
         state.pppoe = { username: inputs.pppoeUser.value, password: inputs.pppoePass.value };
         state.static = {
           ip: inputs.staticIp.value,
@@ -371,6 +379,7 @@ function wirelessSteps(state, overview, variant) {
     lanIp: el('input', { value: overview.defaults.lanIp ?? '' }),
     ssid: el('input', { value: state.wifiSsid ?? overview.defaults.wifiSsid ?? '' }),
     key: el('input', { type: 'password', value: state.wifiKey ?? overview.defaults.wifiKey ?? '', placeholder: 'At least 8 characters' }),
+    ipv6: toggle({ checked: state.ipv6 !== false, label: 'Enable IPv6', hint: 'Keep this on if your provider supports IPv6.' }),
   };
   const hotspot = variant === 'hotspot';
 
@@ -385,6 +394,53 @@ function wirelessSteps(state, overview, variant) {
           if (state.needsPassword) inputs.password.focus();
         });
 
+        let disconnectBlock = null;
+        if (overview.current.id === 'repeater' || overview.current.id === 'hotspot') {
+          const currentUplink = overview.current.uplink;
+          if (currentUplink?.kind === 'wireless' && currentUplink?.ssid) {
+            const btn = el('button', {
+              class: 'btn btn-ghost btn-small',
+              type: 'button',
+              onclick: async () => {
+                const { confirmDialog } = await import('../components.js');
+                if (await confirmDialog({
+                  title: 'Disconnect from this network?',
+                  message: 'You will lose internet access.',
+                  confirmLabel: 'Disconnect',
+                  tone: 'danger'
+                })) {
+                  btn.disabled = true;
+                  try {
+                    await api.disconnectRepeater();
+                    let seconds = 65;
+                    const interval = setInterval(() => {
+                      seconds -= 1;
+                      btn.textContent = `Applying... ${seconds}s`;
+                      if (seconds <= 0) {
+                        clearInterval(interval);
+                        location.reload();
+                      }
+                    }, 1000);
+                  } catch (e) {
+                    alert('Failed: ' + e.message);
+                    btn.disabled = false;
+                    btn.textContent = 'Disconnect';
+                  }
+                }
+              },
+              text: 'Disconnect'
+            });
+
+            disconnectBlock = el('div', { class: 'alert alert-info', style: 'display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;' }, [
+              el('div', {}, [
+                el('strong', { text: `Currently connected to: ${currentUplink.ssid}` }),
+                el('div', { class: 'detail', text: 'To disconnect and stop being a repeater, click Disconnect.' })
+              ]),
+              btn
+            ]);
+          }
+        }
+
         return el('div', {}, [
           stepHero(
             hotspot ? 'smartphone' : 'wifi',
@@ -393,6 +449,7 @@ function wirelessSteps(state, overview, variant) {
               ? 'Turn on your phone’s hotspot, then pick it from the list. Your devices keep using this router’s Wi-Fi as normal.'
               : 'Pick the network you want to extend. This router will join it and pass the connection on.',
           ),
+          disconnectBlock,
           picker,
           passwordField,
           overview.wireless?.singleRadio
@@ -421,11 +478,17 @@ function wirelessSteps(state, overview, variant) {
               }),
             ]),
           ]),
-          advanced('Advanced settings', [field('Router address', inputs.lanIp, 'Leave as it is unless you know you need a specific range.')]),
+          advanced('Advanced settings', [
+            // IPv6 removed for pure IPv4 mode
+            // inputs.ipv6,
+            // el('div', { style: 'height:12px' }),
+            field('Router address', inputs.lanIp, 'Leave as it is unless you know you need a specific range.')
+          ]),
         ]);
       },
       commit() {
         state.lanIp = inputs.lanIp.value.trim();
+        state.ipv6 = false; // Hardcoded to false
       },
     },
     wifiStep(state, inputs, 'Wi-Fi for your own devices'),
@@ -497,7 +560,7 @@ function buildPayload(modeId, state) {
     : { enabled: false };
 
   if (modeId === 'router') {
-    const payload = { connection: state.connection, lan: { leasetime: state.leasetime || '12h' }, wifi };
+    const payload = { connection: state.connection, lan: { leasetime: state.leasetime || '12h' }, wifi, ipv6: state.ipv6 !== false };
     if (state.lanIp) payload.lan.ip = state.lanIp;
     if (state.connection === 'pppoe') payload.pppoe = state.pppoe;
     if (state.connection === 'static') payload.static = state.static;
@@ -518,6 +581,7 @@ function buildPayload(modeId, state) {
     encryption: state.encryption ?? 'psk2',
     lan: state.lanIp ? { ip: state.lanIp } : {},
     wifi,
+    ipv6: state.ipv6 !== false,  // forward the user's IPv6 toggle choice to the backend
   };
 }
 
@@ -644,7 +708,7 @@ export function renderModeSetup(container, { onUnauthorized }) {
       clear(body).append(
         el('div', { class: 'current-banner' }, [
           el('span', { text: 'Right now: ' }),
-          el('strong', { text: modeById(overview.current.id).title }),
+          el('strong', { text: modeById(overview.current.id)?.title ?? 'Custom setup' }),
           el('span', { text: ` · Internet source: ${overview.current.internetSource}` }),
         ]),
         el(
@@ -655,6 +719,7 @@ export function renderModeSetup(container, { onUnauthorized }) {
               current: overview.current.id === mode.id,
               available: overview.available[mode.id],
               onSelect: (id) => showWizard(overview, id),
+              uplink: overview.current.id === mode.id ? overview.current.uplink : null,
             }),
           ),
         ),
@@ -667,10 +732,13 @@ export function renderModeSetup(container, { onUnauthorized }) {
 
   const showWizard = (overview, modeId) => {
     const meta = modeById(modeId);
+    const currentUplink = (overview.current.id === 'repeater' || overview.current.id === 'hotspot') ? overview.current.uplink : null;
     const state = {
       connection: 'auto',
       uplink: overview.preflight.ap?.suggestedUplink ?? 'wan',
       radio: overview.wireless?.radios?.[0]?.id ?? null,
+      ssid: currentUplink?.kind === 'wireless' ? currentUplink.ssid : null,
+      encryption: currentUplink?.kind === 'wireless' ? 'psk2' : null,
       changeWifi: false,
       needsPassword: true,
     };

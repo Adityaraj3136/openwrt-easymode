@@ -226,10 +226,11 @@ function radioSummary(radio, handlers) {
         ? el('button', { class: 'btn btn-ghost btn-small', onclick: async (e) => {
             const btn = e.currentTarget;
             btn.disabled = true;
-            btn.innerHTML = `<span class="spinner" style="width:14px;height:14px;border-width:2px;margin-right:6px;display:inline-block"></span> Optimizing...`;
+            btn.innerHTML = `<span class="spinner" style="width:14px;height:14px;border-width:2px;margin-right:6px;display:inline-block"></span> Scanning & optimizing...`;
             try {
-              await api.updateRadio(radio.id, { channel: 'auto' });
-              toast(`${radio.label.replace(' Wi-Fi', '')} channel optimized`, { tone: 'ok' });
+              const result = await api.optimizeRadio(radio.id);
+              const chLabel = result.channel ? `to channel ${result.channel}` : '';
+              toast(`${radio.label.replace(' Wi-Fi', '')} optimized ${chLabel}`, { tone: 'ok' });
               handlers.onSaved();
             } catch (error) {
               if (error.status === 401) return handlers.onUnauthorized();

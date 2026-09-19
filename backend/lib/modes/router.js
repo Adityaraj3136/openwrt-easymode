@@ -19,7 +19,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export function parseRouterOptions(body = {}) {
   const connection = requireOneOf(body.connection ?? 'auto', ['auto', 'pppoe', 'static'], 'connection');
 
-  const options = { connection, lan: {}, wifi: { enabled: false } };
+  const options = { connection, ipv6: body.ipv6 !== false, lan: {}, wifi: { enabled: false } };
 
   if (body.macaddr) {
     const mac = String(body.macaddr).trim().toLowerCase();
@@ -97,7 +97,7 @@ export async function routerPreflight(client) {
     reason: !device
       ? 'No WAN port found on this router.'
       : physical && !physical.carrier
-        ? 'No cable detected in the WAN port.'
+        ? 'No cable detected in the WAN port. You can still set up the router now and plug it in later.'
         : null,
   };
 }
@@ -161,13 +161,14 @@ export const routerModePlan = {
     if (!preflight.wanDevice) {
       throw new AppError('NO_WAN_PORT', 'This router has no WAN port that EasyMode can use.', { status: 409 });
     }
-    if (preflight.carrier === false) {
-      throw new AppError(
-        'NO_WAN_LINK',
-        'Plug the cable from your modem or main router into the WAN port, then try again.',
-        { status: 409 },
-      );
-    }
+    // Allow setup even if WAN cable is unplugged.
+    // if (preflight.carrier === false) {
+    //   throw new AppError(
+    //     'NO_WAN_LINK',
+    //     'Plug the cable from your modem or main router into the WAN port, then try again.',
+    //     { status: 409 },
+    //   );
+    // }
     ctx.facts.wanDevice = preflight.wanDevice;
     ctx.facts.preflightDetail = `WAN port ${preflight.wanDevice}${preflight.speed ? ` at ${preflight.speed}` : ''}`;
   },
@@ -199,6 +200,18 @@ export const routerModePlan = {
     await removePortFromLanBridge(ctx, ctx.facts.wanDevice);
     await uci.clearOptions('network', 'lan', ['gateway', 'dns']);
 
+    // Coming from Wireless Repeater mode, there are leftover wwan interfaces and wireless stations.
+    await uci.delete('network', 'wwan');
+    await uci.delete('network', 'wwan6');
+    await uci.delete('dhcp', 'wwan');
+    await uci.delete('dhcp', 'wwan6');
+    const wireless = (await client.uciGet('wireless')) ?? {};
+    for (const [name, section] of Object.entries(wireless)) {
+      if (section['.type'] === 'wifi-iface' && section.mode === 'sta') {
+        await uci.delete('wireless', name);
+      }
+    }
+
     await uci.ensure('network', 'wan', 'interface', { device: ctx.facts.wanDevice });
 
     if (options.connection === 'auto') {
@@ -228,7 +241,7 @@ export const routerModePlan = {
       await uci.clearOptions('network', 'wan', ['macaddr']);
     }
 
-    await uci.set('network', 'lan', { proto: 'static', ipaddr: lanIp, netmask: lanNetmask });
+    await uci.set('network', 'lan', { proto: 'static', ipaddr: lanIp, netmask: lanNetmask, ipv6: '0' });
     if (lanIp !== ctx.session.host) ctx.facts.newLanIp = lanIp;
     ctx.facts.lanIp = lanIp;
     ctx.facts.lanNetmask = lanNetmask;
@@ -241,9 +254,15 @@ export const routerModePlan = {
       limit: lanDhcp?.section.limit ?? '150',
       leasetime: ctx.options.lan.leasetime,
       ignore: '0',
+      dhcpv6: 'disabled',
+      ra: 'disabled',
+      ndp: 'disabled'
     };
     if (lanDhcp) await uci.set('dhcp', lanDhcp.name, dhcpValues);
     else await uci.ensure('dhcp', 'lan', 'dhcp', dhcpValues);
+
+    // Completely disable IPv6 handling
+    await uci.delete('network', 'wan6');
 
     await ensureFirewall(uci, client);
 
@@ -269,6 +288,24 @@ export const routerModePlan = {
 
     const address = wan?.['ipv4-address']?.[0];
     if (!wan?.up || !address) {
+      // If the cable isn't plugged in, the interface won't come up. That's expected if the user is 
+      // setting it up offline. Let them pass verification instead of failing and rolling back.
+      const devices = (await client.tryCall('network.device', 'status', {}, null)) ?? {};
+      const physical = ctx.facts.wanDevice ? devices[ctx.facts.wanDevice] : null;
+      if (physical && !physical.carrier) {
+        return {
+          ok: true,
+          detail: 'Setup complete. Plug in the internet cable to go online.',
+          summary: {
+            wanIp: null,
+            gateway: null,
+            lanIp: ctx.facts.lanIp,
+            internetVerified: false,
+            lanMoved: ctx.facts.lanMoved ?? null,
+          }
+        };
+      }
+
       return {
         ok: false,
         reason:

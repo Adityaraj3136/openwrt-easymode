@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { AppError } from '../lib/errors.js';
 import { apModePlan, apPreflightInfo, parseApOptions } from '../lib/modes/ap.js';
 import { getJob, startModeJob } from '../lib/modes/engine.js';
+import { isInternetPaused } from '../lib/repeater-state.js';
 import { parseRouterOptions, routerModePlan, routerPreflight } from '../lib/modes/router.js';
 import { hotspotModePlan, parseWirelessUplinkOptions, repeaterModePlan } from '../lib/modes/wireless-uplink.js';
 import { getModeStatus } from '../lib/status/mode.js';
@@ -26,9 +27,10 @@ modeRouter.get(
     const mode = await getModeStatus(req.ubus, { network, radios });
     const wireless = (await req.ubus.uciGet('wireless')) ?? {};
     const firstAp = findSections(wireless, 'wifi-iface', (section) => (section.mode ?? 'ap') === 'ap')[0];
+    const repeaterPaused = await isInternetPaused(req.ubus);
 
     res.json({
-      current: mode,
+      current: { ...mode, repeaterPaused: repeaterPaused, uplink: mode.uplink ? { ...mode.uplink, paused: repeaterPaused } : mode.uplink },
       busy: hasRunningJob(req.session),
       defaults: {
         lanIp: network.lan.ip,

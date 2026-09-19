@@ -98,6 +98,9 @@ export class UbusClient {
   /** ubus call. Returns the payload object (`{}` when the method returns nothing). */
   async call(object, method, args = {}) {
     const result = await this.rpc('call', [this.sid, object, method, args]);
+    if (object === 'uci' && method === 'commit') {
+      console.log(`[ubus debug] uci commit ${args.config} raw result:`, JSON.stringify(result));
+    }
     if (!Array.isArray(result)) throw errors.routerFailed(`unexpected reply for ${object}.${method}`);
     const [status, data] = result;
     if (status !== 0) throw new UbusError(status, `${object}.${method}`);

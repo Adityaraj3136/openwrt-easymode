@@ -23,13 +23,27 @@ export async function commitWithRollback({
   // A change that moves the router's own address must be followed to the new one.
   candidates = null,
 }) {
-  const rollbackSupported = await Uci.supportsRollback(client);
-  if (rollbackSupported) await uci.apply(timeoutSeconds);
-  else await uci.commitAll();
+  let rollbackSupported = await Uci.supportsRollback(client);
+  if (rollbackSupported) {
+    try {
+      await uci.apply(timeoutSeconds);
+    } catch (applyErr) {
+      // Some vendor OpenWrt builds (e.g. MT7986) list apply/confirm/rollback in ubus
+      // but return NO_DATA when actually called — treat this as "rollback not available".
+      if (applyErr?.code === 'ROUTER_ERROR' || String(applyErr?.message).includes('NO_DATA')) {
+        rollbackSupported = false;
+        await uci.commitAll();
+      } else {
+        throw applyErr;
+      }
+    }
+  } else {
+    await uci.commitAll();
+  }
 
   await sleep(settleMs);
   const hosts = [...new Set([...(candidates ?? []), session.host].filter(Boolean))];
-  const connection = await reconnect(session, hosts, { attempts: 12, delayMs: 2500 });
+  const connection = await reconnect(session, hosts, { attempts: 35, delayMs: 2500 });
   if (!connection) {
     throw new AppError(
       'ROUTER_UNREACHABLE_AFTER_CHANGE',

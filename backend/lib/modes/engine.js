@@ -81,7 +81,9 @@ export async function reconnect(session, candidates, { attempts = 12, delayMs = 
     for (const host of candidates) {
       const client = new UbusClient({ host, scheme: session.scheme, sid: session.ubusSid, timeoutMs: 4000 });
       try {
-        await client.call('system', 'info');
+        // Use a privileged call (uci.get) rather than system.info — on some vendor
+        // firmware system.info returns OK even with a stale SID, masking session loss.
+        await client.call('uci', 'get', { config: 'system' });
         return { client, host };
       } catch {
         /* keep trying */

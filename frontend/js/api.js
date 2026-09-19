@@ -41,6 +41,10 @@ export const api = {
   wifiClients: () => request('/wifi/clients'),
   updateRadio: (radio, settings) =>
     request(`/wifi/radio/${encodeURIComponent(radio)}`, { method: 'POST', body: settings }),
+  optimizeRadio: (radio) =>
+    request(`/wifi/optimize/${encodeURIComponent(radio)}`, { method: 'POST' }),
+  disconnectRepeater: () => request('/wifi/repeater/disconnect', { method: 'POST' }),
+  connectRepeater: () => request('/wifi/repeater/connect', { method: 'POST' }),
   guestWifi: () => request('/wifi/guest'),
   updateGuestWifi: (settings) => request('/wifi/guest', { method: 'POST', body: settings }),
   dhcp: () => request('/dhcp'),

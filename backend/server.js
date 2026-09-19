@@ -13,6 +13,7 @@ import { systemRouter } from './routes/system.js';
 import { wifiRouter } from './routes/wifi.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const ROUTER_IP = process.env.ROUTER_IP || '192.168.8.1';
 const frontendDir = path.join(here, '..', 'frontend');
 
 const app = express();

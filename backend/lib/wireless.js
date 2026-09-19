@@ -190,6 +190,7 @@ export function findStaUplink(radios) {
     if (sta) {
       return {
         configured: true,
+        disabled: sta.disabled,
         connected: sta.up && Boolean(sta.ssid),
         ssid: sta.ssid,
         ifname: sta.ifname,

@@ -28,6 +28,17 @@ export function requireSession(req, _res, next) {
   if (!session) return next(errors.noSession());
   req.session = session;
   req.ubus = clientFor(session);
+
+  // Keepalive: touch the router's ubus session so its rpcd timeout (usually 300s)
+  // doesn't expire while the user is actively using EasyMode. This is a fire-and-forget
+  // call — if it fails (session already dead), the next real API call will surface it.
+  req.ubus.tryCall('session', 'access', {
+    ubus_rpc_session: session.ubusSid,
+    scope: 'ubus',
+    object: 'uci',
+    function: 'get',
+  }).catch(() => {});
+
   next();
 }
 

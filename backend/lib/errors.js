@@ -55,7 +55,7 @@ export const errors = {
       details: detail,
     }),
   routerFailed: (detail) =>
-    new AppError('ROUTER_ERROR', 'The router could not complete the request.', {
+    new AppError('ROUTER_ERROR', `The router could not complete the request: ${detail}`, {
       status: 502,
       details: detail,
     }),

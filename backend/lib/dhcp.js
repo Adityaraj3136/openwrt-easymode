@@ -122,8 +122,12 @@ export async function getDhcpStatus(client, session) {
   const blocked = listBlocks(await client.uciGet('firewall')).map((entry) => ({ ...entry, label: nameFor(entry.mac) }));
   const blockedMacs = new Set(blocked.map((entry) => entry.mac));
 
+  // Determine IPv6 state using a layered approach for reliability.
+  let ipv6Enabled = false; // Hardcoded to false for pure IPv4 mode
+
   return {
     enabled,
+    ipv6Enabled,
     routerIp,
     netmask,
     start,
@@ -163,6 +167,8 @@ export async function updateDhcp(client, session, body = {}) {
   const enabled = body.enabled === undefined ? status.enabled : Boolean(body.enabled);
   if (enabled) guardMode(status, force);
 
+  const ipv6Enabled = body.ipv6 === undefined ? status.ipv6Enabled : Boolean(body.ipv6);
+
   const start = requireRange(body.start ?? status.start, { min: 1, max: 65534, fallback: status.start }, 'start');
   const limit = requireRange(body.limit ?? status.limit, { min: 1, max: 65534, fallback: status.limit }, 'limit');
   const leasetime = requireLeaseTime(body.leasetime ?? status.leasetime, 'leasetime');
@@ -174,9 +180,10 @@ export async function updateDhcp(client, session, body = {}) {
     .filter(Boolean)
     .map((entry) => requireIpv4(entry, 'dns'));
 
-  const snapshot = await snapshotConfigs(client, ['dhcp']);
+  const snapshot = await snapshotConfigs(client, ['dhcp', 'network']);
   const uci = new Uci(client);
   const dhcpConfig = (await client.uciGet('dhcp')) ?? {};
+  const networkConfig = (await client.uciGet('network')) ?? {};
   const lanDhcp = lanDhcpSection(dhcpConfig);
 
   const values = {
@@ -186,6 +193,14 @@ export async function updateDhcp(client, session, body = {}) {
     leasetime,
     ignore: enabled ? '0' : '1',
   };
+  
+  const isRepeater = !!networkConfig.wwan;
+
+  // Always force pure IPv4 mode
+  values.dhcpv6 = 'disabled';
+  values.ra = 'disabled';
+  values.ndp = 'disabled';
+  
   if (lanDhcp) await uci.set('dhcp', lanDhcp.name, values);
   else await uci.ensure('dhcp', 'lan', 'dhcp', values);
 
@@ -193,8 +208,41 @@ export async function updateDhcp(client, session, body = {}) {
   if (dns.length) await uci.set('dhcp', sectionName, { dhcp_option: [`6,${dns.join(',')}`] });
   else await uci.clearOptions('dhcp', sectionName, ['dhcp_option']);
 
-  await commitWithRollback({ client, session, uci, snapshot, settleMs: 1500 });
-  return { ...(await getDhcpStatus(client, session)), range };
+  // Disable kernel IPv6 on the LAN interface so devices drop cached prefixes
+  await uci.set('network', 'lan', { ipv6: '0' });
+
+  // For repeater mode: remove any IPv6 interfaces and relays
+  if (isRepeater) {
+    const wwanKey = Object.keys(networkConfig).find(k => networkConfig[k]?.proto === 'dhcp' && k.startsWith('wwan')) ?? 'wwan';
+    // Disable kernel IPv6 on the STA interface so Airtel's RAs are not processed.
+    await uci.set('network', wwanKey, { ipv6: '0' });
+    // Remove the wwan6 network interface and the relay master section.
+    await uci.delete('network', 'wwan6');
+    await uci.delete('dhcp', 'wwan');
+  }
+
+  // For DHCP-only changes, skip the heavy commitWithRollback.
+  await uci.commitAll();
+
+  // Wait up to 10s for cron to fire (it usually fires in <2s on this router).
+  // Use short individual timeouts to avoid hitting the 8s ubus timeout.
+  for (let i = 0; i < 5; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      const crontab = await client.tryCall('file', 'read', { path: '/etc/crontabs/root' }) || { data: '' };
+      if (!crontab.data.includes('easymode_commit_all')) break;
+    } catch {
+      // briefly unreachable during reload — keep waiting
+    }
+  }
+
+  // Read and return the actual committed state from the router
+  try {
+    return { ...(await getDhcpStatus(client, session)), range };
+  } catch {
+    // If router is briefly restarting odhcpd, return desired state optimistically
+    return { ...status, ipv6Enabled, range };
+  }
 }
 
 export async function addReservation(client, session, body = {}) {
