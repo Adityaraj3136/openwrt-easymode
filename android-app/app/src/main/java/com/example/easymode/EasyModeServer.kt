@@ -516,11 +516,25 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 reservations.put(JSONObject().put("section", k).put("mac", s.optString("mac"))
                     .put("ip", s.optString("ip")).put("name", s.optString("name", "")))
         }
+        // DNS: UCI stores as a list — may be JSONArray or space-separated string
+        val dnsArr = JSONArray()
+        lanSec?.let { sec ->
+            when (val raw = sec.opt("dhcp_option") ?: sec.opt("dns")) {
+                is JSONArray -> for (i in 0 until raw.length()) {
+                    val entry = raw.optString(i)
+                    // dhcp_option format: "6,1.1.1.1,8.8.8.8"
+                    if (entry.startsWith("6,")) entry.removePrefix("6,").split(",").forEach { dnsArr.put(it.trim()) }
+                    else if (entry.isNotEmpty()) dnsArr.put(entry.trim())
+                }
+                is String -> if (raw.isNotEmpty()) raw.split(" ", ",").forEach { if (it.isNotBlank()) dnsArr.put(it.trim()) }
+                else -> Unit
+            }
+        }
         return ok(JSONObject().put("enabled", lanSec?.optString("ignore") != "1")
             .put("ipv6Enabled", false).put("routerIp", activeRouterIp).put("netmask", "255.255.255.0")
             .put("start", lanSec?.optInt("start", 100) ?: 100).put("limit", lanSec?.optInt("limit", 150) ?: 150)
             .put("leasetime", lanSec?.optString("leasetime", "12h") ?: "12h")
-            .put("dns", JSONArray()).put("reservations", reservations).put("blocked", JSONArray()))
+            .put("dns", dnsArr).put("reservations", reservations).put("blocked", JSONArray()))
     }
 
     private fun updateDhcp(body: JSONObject): Response {
@@ -533,9 +547,20 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         if (body.has("start")) values.put("start", body.optInt("start").toString())
         if (body.has("limit")) values.put("limit", body.optInt("limit").toString())
         if (body.has("leasetime")) values.put("leasetime", body.optString("leasetime"))
+        if (body.has("dns")) {
+            val dnsInput = body.optJSONArray("dns")
+            if (dnsInput != null && dnsInput.length() > 0) {
+                val servers = (0 until dnsInput.length()).map { dnsInput.optString(it) }.filter { it.isNotBlank() }
+                // Store as dhcp_option "6,<dns1>,<dns2>"
+                values.put("dhcp_option", JSONArray().put("6,${servers.joinToString(",")}"))
+            } else {
+                values.put("dhcp_option", JSONArray()) // clear DNS
+            }
+        }
         uciSet("dhcp", lanSecKey, values); uciCommit("dhcp"); uciApply()
         return buildDhcp()
     }
+
 
     private fun buildLan(): Response {
         val networkCfg = uciOf("network"); val lanSec = networkCfg.optJSONObject("lan") ?: JSONObject()
@@ -666,7 +691,17 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             val upstreamPass = body.optString("password", "")
             val radioId = body.optString("radio", firstRadioId() ?: return err(Response.Status.BAD_REQUEST, "No radio found"))
 
-            // Add STA interface
+            val wireless = uciOf("wireless")
+            val networkCfg = uciOf("network")
+
+            // Remove any existing STA interfaces to avoid duplicates
+            wireless.keys().forEach { k ->
+                val s = wireless.optJSONObject(k) ?: return@forEach
+                if (s.optString(".type") == "wifi-iface" && s.optString("mode") == "sta")
+                    uciDelete("wireless", k)
+            }
+
+            // Add STA interface (always fresh after deleting old ones above)
             val staName = "wwan_sta"
             uciAdd("wireless", staName, "wifi-iface")
             uciSet("wireless", staName, JSONObject()
@@ -674,16 +709,20 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 .put("ssid", upstreamSsid)
                 .also { if (upstreamPass.isNotEmpty()) it.put("encryption", "psk2").put("key", upstreamPass) else it.put("encryption", "none") })
 
-            // Ensure wwan network interface
-            uciAdd("network", "wwan", "interface")
+            // Create wwan network interface only if it doesn't already exist
+            val wwanExists = networkCfg.keys().asSequence().any { k ->
+                networkCfg.optJSONObject(k)?.optString(".name") == "wwan" ||
+                networkCfg.has("wwan")
+            }
+            if (!wwanExists) uciAdd("network", "wwan", "interface")
             uciSet("network", "wwan", JSONObject().put("proto", "dhcp").put("ipv6", "0"))
 
-            // Disable LAN DHCP server
+            // Keep DHCP for LAN clients
             val dhcpCfg = uciOf("dhcp")
             val lanDhcpKey = dhcpCfg.keys().asSequence().firstOrNull { k ->
                 dhcpCfg.optJSONObject(k)?.let { it.optString(".type") == "dhcp" && (it.optString("interface") == "lan" || it.optString(".name") == "lan") } == true
             } ?: "lan"
-            uciSet("dhcp", lanDhcpKey, JSONObject().put("ignore", "0")) // Keep DHCP for LAN clients
+            uciSet("dhcp", lanDhcpKey, JSONObject().put("ignore", "0"))
 
             uciCommit("wireless", "network", "dhcp"); uciApply()
             ok(JSONObject().put("mode", "repeater").put("ok", true).put("pending", true)
@@ -692,6 +731,7 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             err(Response.Status.INTERNAL_ERROR, "Mode switch failed: ${e.message}")
         }
     }
+
 
     // ═══════════════════════════════════════════════════════════
     // Diagnostics

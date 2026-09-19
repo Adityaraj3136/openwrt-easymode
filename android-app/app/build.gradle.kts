@@ -1,7 +1,6 @@
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.compose.compiler)
-  alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -76,11 +75,6 @@ dependencies {
   androidTestImplementation(libs.androidx.test.ext.junit)
   androidTestImplementation(libs.androidx.test.runner)
   androidTestImplementation(libs.androidx.test.espresso.core)
-
-  // Navigation
-  implementation(libs.androidx.navigation3.ui)
-  implementation(libs.androidx.navigation3.runtime)
-  implementation(libs.androidx.lifecycle.viewmodel.navigation3)
 
   implementation("org.nanohttpd:nanohttpd:2.3.1")
   implementation("com.squareup.okhttp3:okhttp:4.12.0")

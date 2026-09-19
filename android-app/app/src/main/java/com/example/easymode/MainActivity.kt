@@ -2,13 +2,16 @@ package com.example.easymode
 
 import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.ServiceConnection
 import android.graphics.Color
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebSettings
@@ -20,23 +23,42 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
-import java.io.IOException
+import androidx.core.content.ContextCompat
 
+/**
+ * MainActivity binds to EasyModeService so the NanoHTTPD server outlives
+ * the activity and survives background/screen-off scenarios.
+ */
 class MainActivity : ComponentActivity() {
-    private var server: EasyModeServer? = null
-    private var webViewRef: WebView? = null
 
-    // BroadcastReceiver to detect Wi-Fi network changes
+    private var webViewRef: WebView? = null
+    private var serviceBound = false
+    private var boundBinder: EasyModeService.LocalBinder? = null
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            boundBinder = binder as EasyModeService.LocalBinder
+            serviceBound = true
+            // Refresh gateway IP in case network changed before service was ready
+            boundBinder?.getServer()?.onNetworkChanged()
+        }
+        override fun onServiceDisconnected(name: ComponentName) {
+            serviceBound = false
+            boundBinder = null
+        }
+    }
+
+    // Detect Wi-Fi network changes and forward to the server
     private val wifiReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == WifiManager.NETWORK_STATE_CHANGED_ACTION ||
                 intent.action == WifiManager.WIFI_STATE_CHANGED_ACTION) {
-                // Update the server's gateway IP when network changes
-                server?.onNetworkChanged()
+                // Tell the service's server about the change
+                val serviceIntent = Intent(context, EasyModeService::class.java)
+                    .putExtra("action", "network_changed")
+                ContextCompat.startForegroundService(context, serviceIntent)
             }
         }
     }
@@ -56,11 +78,12 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        // Start local NanoHTTPD server
-        server = EasyModeServer(this, 8080)
-        try { server?.start() } catch (e: IOException) { e.printStackTrace() }
+        // Start + bind to the foreground service
+        val serviceIntent = Intent(this, EasyModeService::class.java)
+        ContextCompat.startForegroundService(this, serviceIntent)
+        bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
 
-        // Register Wi-Fi state change receiver
+        // Register Wi-Fi change receiver
         val filter = IntentFilter().apply {
             addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION)
             addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
@@ -70,12 +93,12 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    WebViewContainer(server = server)
+                    WebViewContainer(onWebViewReady = { wv -> webViewRef = wv })
                 }
             }
         }
 
-        // Back button: navigate back within the SPA instead of closing the app
+        // Back button: navigate within SPA hash routing instead of closing the app
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 val wv = webViewRef
@@ -91,19 +114,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        if (serviceBound) {
+            unbindService(serviceConnection)
+            serviceBound = false
+        }
         try { unregisterReceiver(wifiReceiver) } catch (_: Exception) {}
-        server?.stop()
     }
-
-    // Called by WebViewContainer to register the WebView reference for back navigation
-    fun registerWebView(wv: WebView) { webViewRef = wv }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
 @androidx.compose.runtime.Composable
-fun WebViewContainer(server: EasyModeServer?) {
-    val activity = androidx.compose.ui.platform.LocalContext.current as MainActivity
-
+fun WebViewContainer(onWebViewReady: (WebView) -> Unit) {
     AndroidView(
         factory = { context ->
             val webView = WebView(context)
@@ -116,24 +137,20 @@ fun WebViewContainer(server: EasyModeServer?) {
                 setSupportZoom(false)
                 builtInZoomControls = false
                 displayZoomControls = false
-                // Allow local storage for session persistence across reloads
                 databaseEnabled = true
             }
 
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
-            // Persist cookies across app restarts
-            CookieManager.getInstance().setAcceptCookie(true)
 
             webView.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView, url: String) {
                     super.onPageFinished(view, url)
-                    // Flush cookies to disk so they survive process death
                     CookieManager.getInstance().flush()
                 }
             }
 
-            activity.registerWebView(webView)
+            onWebViewReady(webView)
             webView.loadUrl("http://localhost:8080/")
             webView
         },

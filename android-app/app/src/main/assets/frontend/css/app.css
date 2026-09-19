@@ -2,14 +2,14 @@
    EasyMode design tokens
    ============================================================ */
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
 
   /* Warmer pastel backgrounds */
   --bg: #f7f9fc;
   --bg-soft: #edf2f6;
   --surface: #ffffff;
   --surface-muted: #f4f6f8;
-  
+
   /* Remove harsh borders */
   --line: rgba(0, 0, 0, 0.04);
   --line-soft: rgba(0, 0, 0, 0.02);
@@ -45,11 +45,47 @@
   --shadow: 0 8px 24px rgba(32, 33, 36, 0.05);
   --shadow-lg: 0 16px 40px rgba(32, 33, 36, 0.08);
 
-  --sans: 'Google Sans', 'Nunito', 'Inter', system-ui, sans-serif;
+  /* System-native font stack — zero network dependency, instant rendering */
+  --sans: -apple-system, 'Roboto', 'Segoe UI', system-ui, sans-serif;
   --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace;
 
   --ease: cubic-bezier(0.2, 0, 0, 1);
   --content: 1200px;
+}
+
+/* ── Dark Mode ── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111318;
+    --bg-soft: #1a1d24;
+    --surface: #1e2128;
+    --surface-muted: #252830;
+
+    --line: rgba(255, 255, 255, 0.06);
+    --line-soft: rgba(255, 255, 255, 0.03);
+
+    --text: #e3e5ea;
+    --text-muted: #9aa0a6;
+    --text-faint: #5f6368;
+
+    --accent: #4da3ff;
+    --accent-strong: #81c3ff;
+    --accent-soft: rgba(77, 163, 255, 0.12);
+    --accent-ring: rgba(77, 163, 255, 0.2);
+
+    --ok: #4caf7d;
+    --ok-soft: rgba(76, 175, 125, 0.12);
+    --warn: #fdd663;
+    --warn-soft: rgba(253, 214, 99, 0.12);
+    --err: #f28b82;
+    --err-soft: rgba(242, 139, 130, 0.12);
+    --info: #4da3ff;
+    --info-soft: rgba(77, 163, 255, 0.12);
+
+    --shadow-xs: 0 4px 12px rgba(0, 0, 0, 0.3);
+    --shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.5);
+  }
 }
 
 * { box-sizing: border-box; }
