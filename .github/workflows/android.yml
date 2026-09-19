@@ -34,7 +34,7 @@ jobs:
     - name: Build release APK
       run: |
         ./gradlew assembleRelease \
-          -Pandroid.injected.signing.store.file=easymode-release.p12 \
+          -Pandroid.injected.signing.store.file=${{ github.workspace }}/android-app/easymode-release.p12 \
           -Pandroid.injected.signing.store.password=EasyMode2025! \
           -Pandroid.injected.signing.key.alias=easymode \
           -Pandroid.injected.signing.key.password=EasyMode2025!

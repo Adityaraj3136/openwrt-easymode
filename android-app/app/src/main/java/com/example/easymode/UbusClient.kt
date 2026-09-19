@@ -47,8 +47,8 @@ class UbusClient {
             val code = resultArr?.optInt(0, -1) ?: -1
             if (code != 0) throw Exception("Ubus Code: $code")
             
-            return if (resultArr.length() > 1) {
-                resultArr.getJSONObject(1)
+            return if ((resultArr?.length() ?: 0) > 1) {
+                resultArr?.optJSONObject(1) ?: JSONObject()
             } else {
                 JSONObject()
             }
