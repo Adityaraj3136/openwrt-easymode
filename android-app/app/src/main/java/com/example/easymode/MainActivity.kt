@@ -88,7 +88,11 @@ class MainActivity : ComponentActivity() {
             addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION)
             addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
         }
-        registerReceiver(wifiReceiver, filter)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(wifiReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(wifiReceiver, filter)
+        }
 
         setContent {
             MaterialTheme {

@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.Binder
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -35,15 +37,15 @@ class EasyModeService : Service() {
         super.onCreate()
         createNotificationChannel()
 
-        // Use ServiceCompat.startForeground which handles Android 14+ FOREGROUND_SERVICE_TYPE safely
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        } else {
+            0
+        }
+
         try {
-            ServiceCompat.startForeground(
-                this, NOTIF_ID, buildNotification(),
-                // 0 = no special foreground service type (avoids FOREGROUND_SERVICE_DATA_SYNC requirement)
-                0
-            )
+            ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(), type)
         } catch (e: Exception) {
-            // Fallback for older API or if notification permission denied
             startForeground(NOTIF_ID, buildNotification())
         }
 

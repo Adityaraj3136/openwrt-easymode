@@ -6,7 +6,7 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- POST_NOTIFICATIONS is requested at runtime on Android 13+ — not required to start -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:usesCleartextTraffic="true"
@@ -27,9 +27,9 @@
             </intent-filter>
         </activity>
 
-        <!-- Foreground service — no foregroundServiceType so no extra permission needed on Android 14 -->
         <service
             android:name=".EasyModeService"
+            android:foregroundServiceType="dataSync"
             android:exported="false" />
 
     </application>
