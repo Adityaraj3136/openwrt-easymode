@@ -756,14 +756,10 @@ svg { display: block; flex-shrink: 0; }
 .radio-fact strong { font-size: 15px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 
 /* ============================================================
-   Responsive
+   Responsive — Mobile-first
    ============================================================ */
-@media (max-width: 1100px) {
-  .topology { flex-wrap: wrap; gap: 18px; }
-  .topo-link { flex-basis: 100%; padding-bottom: 0; }
-  .topo-wire { width: 60%; }
-}
 
+/* ── 860 px (tablet and smaller phones in landscape) ── */
 @media (max-width: 860px) {
   .main { padding: 20px 16px 56px; }
   .appbar-inner, .navbar-inner { padding: 0 16px; }
@@ -784,11 +780,89 @@ svg { display: block; flex-shrink: 0; }
   .modal-overlay { padding: 0; align-items: flex-end; }
   .modal { max-width: none; border-radius: var(--r-lg) var(--r-lg) 0 0; max-height: 92vh; }
   .toast-host { right: 12px; left: 12px; bottom: 12px; max-width: none; }
+  /* Login: side-by-side -> stacked */
+  .login-wrap { grid-template-columns: 1fr; }
+  .login-art { min-height: 180px; padding: 24px 20px; }
+  .login-art h1 { font-size: 22px; }
+  .login-art p { display: none; }
+  .login-panel { padding: 20px 16px; }
+  .login-card { padding: 22px 18px; }
+}
+
+/* ── 480 px (phones in portrait) ── */
+@media (max-width: 480px) {
+  body { font-size: 14px; }
+
+  /* Tighter app shell */
+  .appbar-inner { height: 50px; gap: 10px; }
+  .navbar { top: 50px; }
+  .main { padding: 16px 12px calc(56px + env(safe-area-inset-bottom, 0px)) 12px; }
+
+  /* Typography */
+  .hero h1 { font-size: 20px; }
+  .page-head h1 { font-size: 20px; }
+  .stat .value { font-size: 22px; }
+
+  /* Topology: make nodes smaller on very narrow screens */
+  .topo-glyph { width: 60px; height: 60px; border-radius: 18px; }
+  .topo-node { min-width: 80px; }
+
+  /* Cards: reduce padding */
+  .card { padding: 16px; }
+  .topology-card { padding: 16px; }
+
+  /* Login: full-width single column, minimal art */
+  .login-wrap { min-height: 100svh; }
+  .login-art { min-height: 130px; padding: 18px 16px; }
+  .login-art .mode-chips { display: none; }
+  .login-panel { padding: 16px 12px; align-items: stretch; }
+  .login-card { padding: 18px 14px; border-radius: var(--r); }
+
+  /* Modals: full-width sheet */
+  .modal-body { padding: 16px; }
+  .modal-head { padding: 16px 16px 12px; }
+  .modal-foot { padding: 12px 16px 16px; }
+
+  /* Toasts */
+  .toast-host { right: 8px; left: 8px; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+  .toast { padding: 10px 12px; }
+
+  /* Mode grid: prevent tiny side-by-side even on 2-col fallback */
+  .mode-grid { grid-template-columns: 1fr; }
+
+  /* Radio facts: 2-col -> 1-col on very narrow */
+  .radio-facts { grid-template-columns: 1fr; }
+
+  /* Stepper: just dots, no labels, no bars on mobile */
+  .stepper-bar { display: none; }
+
+  /* Tables scroll nicely */
+  .table-wrap { margin: 0 -12px; padding: 0 12px; }
+
+  /* Form buttons full-width on mobile */
+  .button-row { flex-direction: column; }
+  .button-row .btn { width: 100%; }
+
+  /* Wizard: full-width */
+  .wizard { max-width: 100%; }
+  .setup-card { max-width: 100%; }
+  .progress-card { max-width: 100%; }
+}
+
+/* ── Safe area support for notched / gesture-nav phones ── */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  .main {
+    padding-bottom: max(56px, calc(24px + env(safe-area-inset-bottom)));
+  }
+  .modal-foot {
+    padding-bottom: max(18px, calc(12px + env(safe-area-inset-bottom)));
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
 
 /* Custom Select */
 .custom-select { position: relative; display: inline-block; user-select: none; min-width: 140px; }
