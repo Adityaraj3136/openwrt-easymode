@@ -348,12 +348,97 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 eth.put(JSONObject().put("name", name).put("up", d.optBoolean("up")).put("carrier", d.optBoolean("carrier")).put("speed", d.opt("speed")))
             }
         }
+
+        // Fetch Wi-Fi clients (MAC addresses) using iwinfo assoclist
+        val netWireless = tryCall("network.wireless", "status") ?: JSONObject()
+        val wifiMacs = mutableSetOf<String>()
+        netWireless.keys().forEach { radio ->
+            val ifaces = netWireless.optJSONObject(radio)?.optJSONArray("interfaces") ?: return@forEach
+            for (i in 0 until ifaces.length()) {
+                val ifname = ifaces.optJSONObject(i)?.optString("ifname", "") ?: continue
+                if (ifname.isNotEmpty()) {
+                    val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", ifname))
+                    val results = assoc?.optJSONArray("results")
+                    if (results != null) {
+                        for (r in 0 until results.length()) {
+                            val mac = results.optJSONObject(r)?.optString("mac")?.lowercase()
+                            if (mac != null) wifiMacs.add(mac)
+                        }
+                    }
+                }
+            }
+        }
+
+        val clientDevices = JSONArray()
+        var wiredCount = 0
+        var wirelessCount = wifiMacs.size
+        var available = false
+        var reason: String? = null
+
+        // Try reading DHCP leases and ARP via 'file' ubus namespace (requires rpcd-mod-file)
+        val arpRes = tryCall("file", "read", JSONObject().put("path", "/proc/net/arp"))
+        val leasesRes = tryCall("file", "read", JSONObject().put("path", "/tmp/dhcp.leases"))
+        
+        if (arpRes != null || leasesRes != null) {
+            available = true
+            val arpByMac = mutableMapOf<String, String>()
+            val arpData = arpRes?.optString("data", "") ?: ""
+            arpData.split("\n").drop(1).forEach { line ->
+                val parts = line.trim().split(Regex("\\s+"))
+                if (parts.size >= 4) {
+                    val ip = parts[0]; val flags = parts[2].toIntOrNull(16) ?: 0; val mac = parts[3].lowercase()
+                    if (mac != "00:00:00:00:00:00" && (flags and 0x2) != 0) arpByMac[mac] = ip
+                }
+            }
+            
+            val leaseData = leasesRes?.optString("data", "") ?: ""
+            leaseData.split("\n").forEach { line ->
+                val parts = line.trim().split(" ")
+                if (parts.size >= 4) {
+                    val mac = parts[1].lowercase()
+                    val ip = parts[2]
+                    val host = if (parts[3] != "*") parts[3] else null
+                    if (mac != "00:00:00:00:00:00") {
+                        clientDevices.put(JSONObject().put("mac", mac).put("ip", ip).put("hostname", host).put("isWireless", wifiMacs.contains(mac)))
+                        arpByMac.remove(mac) // consumed by DHCP
+                    }
+                }
+            }
+            
+            // Add remaining ARP entries that weren't in DHCP
+            arpByMac.forEach { (mac, ip) ->
+                clientDevices.put(JSONObject().put("mac", mac).put("ip", ip).put("hostname", JSONObject.NULL).put("isWireless", wifiMacs.contains(mac)))
+            }
+            
+            // Recompute counts based on actual seen devices
+            wiredCount = 0
+            wirelessCount = 0
+            for (i in 0 until clientDevices.length()) {
+                if (clientDevices.optJSONObject(i)?.optBoolean("isWireless", false) == true) wirelessCount++ else wiredCount++
+            }
+        } else {
+            // No file read access. Fallback to just showing Wi-Fi devices.
+            if (wifiMacs.isNotEmpty()) {
+                available = true
+                wifiMacs.forEach { mac ->
+                    clientDevices.put(JSONObject().put("mac", mac).put("ip", "-").put("hostname", "Wi-Fi Device").put("isWireless", true))
+                }
+            } else {
+                reason = "Client list requires router-side file access (rpcd-mod-file)"
+            }
+        }
+
         val lan = JSONObject()
             .put("present", lanIface != null).put("up", lanIface?.optBoolean("up") ?: false)
             .put("ip", ipv4(lanIface)).put("device", lanIface?.optString("l3_device") ?: lanIface?.optString("device"))
             .put("dhcpEnabled", dhcpEnabled)
-            .put("clients", JSONObject().put("count", JSONObject.NULL).put("available", false)
-                .put("reason", "Client list requires router-side file access").put("devices", JSONArray()))
+            .put("clients", JSONObject()
+                .put("count", if (available) clientDevices.length() else JSONObject.NULL)
+                .put("wiredCount", if (available) wiredCount else JSONObject.NULL)
+                .put("wirelessCount", if (available) wirelessCount else JSONObject.NULL)
+                .put("available", available)
+                .put("reason", reason)
+                .put("devices", clientDevices))
         val wan = JSONObject()
             .put("present", wanIface != null).put("up", wanIface?.optBoolean("up") ?: false)
             .put("interface", wanIface?.optString("interface"))
@@ -480,34 +565,49 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             var primarySsid: String? = null
             var clients = 0
 
-            // Add active interfaces from network.wireless first (they have live runtime data)
             val netRadio = netWireless.optJSONObject(k)
             val netInterfaces = netRadio?.optJSONArray("interfaces") ?: JSONArray()
-            
-            for (i in 0 until netInterfaces.length()) {
-                val netIface = netInterfaces.optJSONObject(i) ?: continue
-                val cfg = netIface.optJSONObject("config") ?: JSONObject()
-                val mode = cfg.optString("mode", "ap")
-                val ssid = cfg.optString("ssid", null)
-                val ifname = netIface.optString("ifname", "")
+
+            wireless.keys().forEach { ik ->
+                val iface = wireless.optJSONObject(ik) ?: return@forEach
+                val iType = iface.optString(".type").ifEmpty { if (ik.matches(Regex("radio\\d+"))) "wifi-device" else "wifi-iface" }
                 
-                if (mode == "ap" && primarySsid == null) primarySsid = ssid
-                
-                if (detailed && ifname.isNotEmpty()) {
-                    val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", ifname))
-                    clients += assoc?.optJSONArray("results")?.length() ?: 0
+                if (iType == "wifi-iface" && iface.optString("device") == k) {
+                    val mode = iface.optString("mode", "ap")
+                    val ssid = iface.optString("ssid", null)
+                    
+                    var realIfname = iface.optString("ifname", "")
+                    for (i in 0 until netInterfaces.length()) {
+                        val netIface = netInterfaces.optJSONObject(i) ?: continue
+                        val cfg = netIface.optJSONObject("config") ?: JSONObject()
+                        if (cfg.optString(".name") == ik || cfg.optString("ssid") == ssid) {
+                            val nIf = netIface.optString("ifname", "")
+                            if (nIf.isNotEmpty()) realIfname = nIf
+                        }
+                    }
+                    
+                    if (mode == "ap" && primarySsid == null) primarySsid = ssid
+                    
+                    if (detailed && realIfname.isNotEmpty()) {
+                        val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", realIfname))
+                        clients += assoc?.optJSONArray("results")?.length() ?: 0
+                    }
+                    
+                    val nwStr = iface.optString("network", "")
+                    val nwArr = iface.optJSONArray("network")
+                    val netList = nwArr ?: if (nwStr.isNotEmpty()) JSONArray().put(nwStr) else JSONArray()
+                    
+                    interfaces.put(JSONObject()
+                        .put("section", ik)
+                        .put("ifname", realIfname)
+                        .put("mode", mode)
+                        .put("ssid", ssid)
+                        .put("network", netList)
+                        .put("encryption", iface.optString("encryption", "none"))
+                        .put("disabled", iface.optString("disabled", "0") == "1")
+                        .put("hidden", iface.optString("hidden", "0") == "1")
+                    )
                 }
-                
-                interfaces.put(JSONObject()
-                    .put("section", cfg.optString(".name", null))
-                    .put("ifname", ifname)
-                    .put("mode", mode)
-                    .put("ssid", ssid)
-                    .put("network", cfg.opt("network")?.let { if (it is JSONArray) it else JSONArray().put(it) } ?: JSONArray())
-                    .put("encryption", cfg.optString("encryption", "none"))
-                    .put("disabled", cfg.optString("disabled", "0") == "1")
-                    .put("hidden", cfg.optString("hidden", "0") == "1")
-                )
             }
 
             val band = bandFromSection(s)
