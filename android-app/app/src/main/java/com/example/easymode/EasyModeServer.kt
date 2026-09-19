@@ -226,7 +226,7 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             return unblockClient(uri.removePrefix("/api/dhcp/blocked/"))
 
         // ── Mode switching ───────────────────────────────────────
-        if (uri == "/api/mode") return ok(buildModePayload())
+        if (uri == \"/api/mode\") return ok(buildModeOverview())
         if (uri == "/api/mode/router" && method == Method.POST) return switchToRouter(body)
         if (uri == "/api/mode/ap" && method == Method.POST) return switchToAP(body)
         if (uri == "/api/mode/repeater" && method == Method.POST) return switchToRepeater(body)
@@ -353,19 +353,90 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     // ═══════════════════════════════════════════════════════════
     // Mode
     // ═══════════════════════════════════════════════════════════
-    private fun buildModePayload(): JSONObject {
-        val wireless = uciOf("wireless"); var mode = "router"; var ssid: String? = null
+    // Returns the full mode overview object the Mode page (api.modeOverview) expects
+    private fun buildModeOverview(): JSONObject {
+        val wireless = uciOf("wireless")
+        var modeId = "router"
+        var uplinkSsid: String? = null
+
         wireless.keys().forEach { k ->
             val s = wireless.optJSONObject(k) ?: return@forEach
-            if (s.optString(".type") == "wifi-iface" && s.optString("mode") == "sta") {
-                mode = "repeater"; ssid = s.optString("ssid", null)
+            if ((s.optString(".type") == "wifi-iface") && s.optString("mode") == "sta") {
+                modeId = "repeater"; uplinkSsid = s.optString("ssid", null)
             }
         }
-        return JSONObject().put("id", mode)
-            .put("title", if (mode == "repeater") "Wi-Fi Repeater" else "Router")
-            .put("internetSource", if (mode == "repeater") "Wireless Uplink${if (ssid != null) " ($ssid)" else ""}" else "Ethernet WAN")
+
+        // Check if AP mode: LAN interface has proto=dhcp (gets IP from upstream)
+        val network = uciOf("network")
+        val lanSec = network.optJSONObject("lan") ?: JSONObject()
+        if (modeId != "repeater" && lanSec.optString("proto") == "dhcp") modeId = "ap"
+
+        val internetSource = when (modeId) {
+            "repeater" -> "Wireless Uplink${if (uplinkSsid != null) " ($uplinkSsid)" else ""}"
+            "ap"       -> "Ethernet (from upstream router)"
+            else       -> "Ethernet WAN"
+        }
+
+        // Build radios list
+        val radioArr = JSONArray()
+        wireless.keys().forEach { k ->
+            val s = wireless.optJSONObject(k) ?: return@forEach
+            if (s.optString(".type") != "wifi-device") return@forEach
+            val band = bandFromSection(s)
+            radioArr.put(JSONObject().put("id", k).put("band", band)
+                .put("label", if (band == "5GHz") "5 GHz" else "2.4 GHz")
+                .put("enabled", s.optString("disabled") != "1"))
+        }
+
+        // Current mode object
+        val currentObj = JSONObject()
+            .put("id", modeId)
+            .put("title", when (modeId) { "repeater" -> "Wi-Fi Repeater"; "ap" -> "Access Point"; else -> "Router" })
+            .put("internetSource", internetSource)
             .put("repeaterPaused", false)
+        if (uplinkSsid != null) {
+            currentObj.put("uplink", JSONObject().put("kind", "wireless").put("ssid", uplinkSsid).put("paused", false))
+        }
+
+        // First AP iface defaults
+        var defaultSsid: String? = null; var defaultEncryption = "psk2"
+        wireless.keys().forEach { k ->
+            val s = wireless.optJSONObject(k) ?: return@forEach
+            if (s.optString(".type") == "wifi-iface" && s.optString("mode", "ap") == "ap" && defaultSsid == null) {
+                defaultSsid = s.optString("ssid", null)
+                defaultEncryption = s.optString("encryption", "psk2")
+            }
+        }
+
+        return JSONObject()
+            .put("current", currentObj)
+            .put("busy", false)
+            .put("defaults", JSONObject()
+                .put("lanIp", lanSec.optString("ipaddr", activeRouterIp))
+                .put("lanNetmask", lanSec.optString("netmask", "255.255.255.0"))
+                .put("wifiSsid", defaultSsid)
+                .put("wifiKey", null)
+                .put("wifiEncryption", defaultEncryption)
+                .put("hasWifi", radioArr.length() > 0))
+            .put("preflight", JSONObject()
+                .put("router", JSONObject().put("ok", true))
+                .put("ap", JSONObject().put("suggestedUplink", "wan")))
+            .put("available", JSONObject()
+                .put("router", true).put("ap", true)
+                .put("repeater", radioArr.length() > 0)
+                .put("hotspot", false))
+            .put("wireless", JSONObject()
+                .put("radios", radioArr)
+                .put("singleRadio", radioArr.length() == 1))
     }
+
+    // Simple current-mode-only object for /api/status/mode (dashboard strip)
+    private fun buildModePayload(): JSONObject {
+        val overview = buildModeOverview()
+        return overview.optJSONObject("current") ?: JSONObject().put("id", "router")
+            .put("title", "Router").put("internetSource", "Ethernet WAN").put("repeaterPaused", false)
+    }
+
 
     // ═══════════════════════════════════════════════════════════
     // Wi-Fi
@@ -379,11 +450,16 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         val wireless = uciOf("wireless"); val radios = JSONArray(); val networks = JSONArray()
         wireless.keys().forEach { k ->
             val s = wireless.optJSONObject(k) ?: return@forEach
-            when (s.optString(".type")) {
+            val type = s.optString(".type").ifEmpty {
+                // Fallback: infer type from section name pattern (radio0, radio1 = wifi-device)
+                if (k.matches(Regex("radio\\d+"))) "wifi-device" else "wifi-iface"
+            }
+            when (type) {
                 "wifi-device" -> {
                     val info = tryCall("iwinfo", "info", JSONObject().put("device", k)) ?: JSONObject()
                     val band = bandFromSection(s)
-                    radios.put(JSONObject().put("id", k).put("band", band).put("label", band)
+                    radios.put(JSONObject().put("id", k).put("band", band)
+                        .put("label", if (band == "5GHz") "5 GHz" else "2.4 GHz")
                         .put("enabled", s.optString("disabled") != "1")
                         .put("channel", s.opt("channel") ?: info.opt("channel"))
                         .put("txpower", s.opt("txpower") ?: info.opt("txpower"))
@@ -408,14 +484,19 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         val wireless = uciOf("wireless"); val out = JSONArray()
         wireless.keys().forEach { k ->
             val s = wireless.optJSONObject(k) ?: return@forEach
-            if (s.optString(".type") != "wifi-device") return@forEach
+            val type = s.optString(".type").ifEmpty {
+                if (k.matches(Regex("radio\\d+"))) "wifi-device" else "wifi-iface"
+            }
+            if (type != "wifi-device") return@forEach
             var ssid: String? = null
             wireless.keys().forEach { ik ->
                 val iface = wireless.optJSONObject(ik) ?: return@forEach
-                if (iface.optString(".type") == "wifi-iface" && iface.optString("device") == k && iface.optString("mode") == "ap")
+                if (iface.optString(".type") == "wifi-iface" && iface.optString("device") == k && iface.optString("mode", "ap") == "ap")
                     ssid = iface.optString("ssid", null)
             }
-            out.put(JSONObject().put("id", k).put("band", bandFromSection(s)).put("label", bandFromSection(s))
+            val band = bandFromSection(s)
+            out.put(JSONObject().put("id", k).put("band", band)
+                .put("label", if (band == "5GHz") "5 GHz" else "2.4 GHz")
                 .put("enabled", s.optString("disabled") != "1").put("ssid", ssid)
                 .put("channel", s.opt("channel")).put("clients", 0).put("interfaces", JSONArray()))
         }
@@ -423,18 +504,25 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     }
 
     private fun buildWifiClients(): Response {
-        val wireless = uciOf("wireless"); val clients = JSONArray()
-        wireless.keys().forEach { k ->
-            val s = wireless.optJSONObject(k) ?: return@forEach
-            if (s.optString(".type") != "wifi-iface" || s.optString("mode") != "ap") return@forEach
-            val ifname = s.optString("ifname", ""); if (ifname.isEmpty()) return@forEach
-            val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", ifname))
-            assoc?.optJSONArray("results")?.let { results ->
-                for (i in 0 until results.length()) {
-                    val e = results.getJSONObject(i)
-                    clients.put(JSONObject().put("mac", e.optString("mac")).put("signal", e.opt("signal"))
-                        .put("radio", s.optString("device")).put("ssid", s.optString("ssid"))
-                        .put("connectedSeconds", e.opt("connected_time")))
+        val clients = JSONArray()
+        // Use network.wireless ubus which gives real runtime interface names
+        val netWireless = tryCall("network.wireless", "status") ?: JSONObject()
+        netWireless.keys().forEach { radioId ->
+            val radioObj = netWireless.optJSONObject(radioId) ?: return@forEach
+            val interfaces = radioObj.optJSONArray("interfaces") ?: return@forEach
+            for (i in 0 until interfaces.length()) {
+                val iface = interfaces.optJSONObject(i) ?: continue
+                val ifname = iface.optString("ifname", "")
+                val config = iface.optJSONObject("config") ?: JSONObject()
+                if (config.optString("mode", "ap") != "ap" || ifname.isEmpty()) continue
+                val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", ifname))
+                assoc?.optJSONArray("results")?.let { results ->
+                    for (j in 0 until results.length()) {
+                        val e = results.getJSONObject(j)
+                        clients.put(JSONObject().put("mac", e.optString("mac")).put("signal", e.opt("signal"))
+                            .put("radio", radioId).put("ssid", config.optString("ssid", ""))
+                            .put("connectedSeconds", e.opt("connected_time")))
+                    }
                 }
             }
         }
@@ -788,45 +876,59 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     private fun buildBandwidth(): Response {
         val devices = tryCall("network.device", "status") ?: JSONObject()
 
-        // Pick the primary WAN interface for throughput display
+        // Pick best WAN candidate: highest-traffic non-loopback/bridge interface
         var primaryRx = 0L; var primaryTx = 0L; var primaryIface = ""
-        val allEntries = JSONArray()
-
         devices.keys().forEach { name ->
             val d = devices.optJSONObject(name) ?: return@forEach
             val stats = d.optJSONObject("statistics") ?: return@forEach
-            if (name.matches(Regex("^(br-|lo).*"))) return@forEach
+            if (name.matches(Regex("^(lo|br-lan).*"))) return@forEach
             val rx = stats.optLong("rx_bytes", 0); val tx = stats.optLong("tx_bytes", 0)
-            allEntries.put(JSONObject().put("interface", name).put("rxBytes", rx).put("txBytes", tx)
-                .put("rxPackets", stats.optLong("rx_packets", 0)).put("txPackets", stats.optLong("tx_packets", 0)))
-            // Pick highest-traffic interface as "primary"
             if (rx + tx > primaryRx + primaryTx) { primaryRx = rx; primaryTx = tx; primaryIface = name }
         }
+
+        val hasData = primaryIface.isNotEmpty()
 
         // Compute bytes/sec from two consecutive samples
         val now = System.currentTimeMillis()
         val prev = lastBwSample
-        var rxRate = 0.0; var txRate = 0.0
+        var rxRate: Long? = null; var txRate: Long? = null
 
-        if (prev != null && prev.iface == primaryIface) {
-            val elapsed = (now - prev.ts).toDouble() / 1000.0  // seconds
-            if (elapsed > 0) {
-                rxRate = maxOf(0.0, (primaryRx - prev.rx).toDouble() / elapsed)
-                txRate = maxOf(0.0, (primaryTx - prev.tx).toDouble() / elapsed)
+        if (hasData && prev != null && prev.iface == primaryIface) {
+            val elapsed = (now - prev.ts).toDouble() / 1000.0
+            if (elapsed > 0.5) {
+                rxRate = maxOf(0L, ((primaryRx - prev.rx).toDouble() / elapsed).toLong())
+                txRate = maxOf(0L, ((primaryTx - prev.tx).toDouble() / elapsed).toLong())
             }
         }
-        lastBwSample = BwSample(now, primaryRx, primaryTx, primaryIface)
+        if (hasData) lastBwSample = BwSample(now, primaryRx, primaryTx, primaryIface)
+
+        // Build total object matching what frontend usagePanel() expects
+        val total = if (hasData) JSONObject()
+            .put("available", true)
+            .put("reason", if (rxRate != null) null else "Collecting first sample — this updates in a few seconds.")
+            .put("rxRate", rxRate)   // bytes/sec download
+            .put("txRate", txRate)   // bytes/sec upload
+            .put("rxBytes", primaryRx)
+            .put("txBytes", primaryTx)
+            .put("interface", primaryIface)
+        else JSONObject()
+            .put("available", false)
+            .put("reason", "No active WAN interface found. Connect to internet first.")
+            .put("rxRate", null).put("txRate", null).put("rxBytes", null).put("txBytes", null)
 
         return ok(JSONObject()
-            .put("available", allEntries.length() > 0)
-            .put("interfaces", allEntries)
-            .put("rx", rxRate.toLong())
-            .put("tx", txRate.toLong())
-            .put("rxBytesPerSecond", rxRate)
-            .put("txBytesPerSecond", txRate)
-            .put("totalLimit", JSONObject.NULL)
-            .put("deviceLimits", JSONArray()))
+            .put("total", total)
+            .put("limits", JSONObject()
+                .put("available", false)
+                .put("reason", "Speed limits require sqm-scripts, which is not installed on this router."))
+            .put("perDevice", JSONObject()
+                .put("available", false)
+                .put("reason", "Per-device tracking requires nlbwmon, which is not installed on this router."))
+            .put("perDeviceLimits", JSONObject()
+                .put("available", false)
+                .put("reason", "Per-device limits require nft-qos, which is not installed on this router.")))
     }
+
 
     // ═══════════════════════════════════════════════════════════
     // Utilities
