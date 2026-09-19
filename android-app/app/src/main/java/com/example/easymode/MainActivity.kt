@@ -52,25 +52,23 @@ class MainActivity : ComponentActivity() {
 fun WebViewScreen() {
     AndroidView(
         factory = { context ->
-            WebView(context).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                settings.useWideViewPort = true
-                settings.loadWithOverviewMode = true
-                settings.setSupportZoom(false)
-                settings.builtInZoomControls = false
-                settings.displayZoomControls = false
+            val webView = WebView(context)
+            webView.settings.javaScriptEnabled = true
+            webView.settings.domStorageEnabled = true
+            webView.settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            webView.settings.useWideViewPort = true
+            webView.settings.loadWithOverviewMode = true
+            webView.settings.setSupportZoom(false)
+            webView.settings.builtInZoomControls = false
+            webView.settings.displayZoomControls = false
 
-                // Enable cookies so the session cookie survives between requests
-                CookieManager.getInstance().apply {
-                    setAcceptCookie(true)
-                    setAcceptThirdPartyCookies(this@apply, true)
-                }
+            // Enable cookies so the session cookie survives between requests
+            CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
-                webViewClient = WebViewClient()
-                loadUrl("http://localhost:8080/")
-            }
+            webView.webViewClient = WebViewClient()
+            webView.loadUrl("http://localhost:8080/")
+            webView
         },
         update = { webView ->
             // Update logic if needed
