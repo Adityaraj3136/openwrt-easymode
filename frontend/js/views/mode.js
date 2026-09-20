@@ -102,7 +102,9 @@ function networkPicker(state, overview, onPick) {
             class: `scan-row${state.ssid === network.ssid ? ' selected' : ''}`,
             onclick: () => {
               state.ssid = network.ssid;
-              state.encryption = network.encryption;
+              // Prefer the explicit mode string (psk2 / sae-mixed / ...); fall back to
+              // network.encryption which the backend also returns as the mode.
+              state.encryption = network.encryptionMode ?? network.encryption;
               state.needsPassword = network.needsPassword;
               draw(networks);
               onPick();

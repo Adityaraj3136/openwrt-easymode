@@ -877,6 +877,32 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
         return ok(JSONObject().put("clients", clients).put("available", true))
     }
 
+    /**
+     * Map an iwinfo scan `encryption` object to the UCI encryption mode a client (STA) must
+     * use to join that network. Mirrors backend/lib/derive.js scanEncryption: WPA3/SAE →
+     * sae-mixed (also joins WPA2/WPA3-mixed APs), WPA2 → psk2, WPA1 → psk, open → none.
+     */
+    private fun scanEncryptionMode(enc: JSONObject?): String {
+        if (enc == null || !enc.optBoolean("enabled", false)) return "none"
+        val wpa = enc.optJSONArray("wpa")
+        val wpaVersions = mutableSetOf<Int>()
+        if (wpa != null) for (i in 0 until wpa.length()) wpaVersions.add(wpa.optInt(i, 0))
+        val auth = enc.optJSONArray("authentication")
+        val authTypes = mutableSetOf<String>()
+        if (auth != null) for (i in 0 until auth.length()) authTypes.add(auth.optString(i, ""))
+        if (authTypes.contains("sae") || wpaVersions.contains(3)) return "sae-mixed"
+        if (wpaVersions.contains(2)) return "psk2"
+        if (wpaVersions.contains(1)) return "psk"
+        return "psk2"
+    }
+
+    private fun encryptionLabelFor(mode: String): String = when (mode) {
+        "none" -> "Open"
+        "sae-mixed", "sae" -> "WPA3"
+        "psk" -> "WPA (older)"
+        else -> "WPA2"
+    }
+
     private fun buildWifiScan(radioId: String?): Response {
         val radio = radioId ?: firstRadioId() ?: return ok(JSONObject().put("networks", JSONArray()).put("joinable", JSONObject()).put("congestion", JSONObject()))
 
@@ -911,14 +937,17 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
                 val ch = r.optInt("channel", 0)
                 val encObj = r.optJSONObject("encryption")
                 val encEnabled = encObj?.optBoolean("enabled", false) ?: false
-                val encDesc = encObj?.optString("description", "none") ?: "none"
+                // Derive the UCI encryption mode (psk2 / sae-mixed / ...) the STA must use to
+                // join. Guessing psk2 for a WPA3 network fails to associate. Mirrors the PC's
+                // scanEncryption (backend/lib/derive.js).
+                val encMode = scanEncryptionMode(encObj)
                 networks.put(JSONObject().put("ssid", r.optString("ssid")).put("bssid", r.optString("bssid"))
                     .put("signal", sig).put("quality", maxOf(0, minOf(100, (sig + 100) * 2)))
                     .put("channel", ch)
                     .put("band", if (ch > 14) 5 else 2.4)
-                    .put("encryption", encEnabled)
-                    .put("encryptionMode", encDesc)
-                    .put("encryptionLabel", if (encEnabled) encDesc else "Open")
+                    .put("encryption", encMode)
+                    .put("encryptionMode", encMode)
+                    .put("encryptionLabel", encryptionLabelFor(encMode))
                     .put("needsPassword", encEnabled))
             }
         }
@@ -1603,6 +1632,12 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             val upstreamSsid = body.optString("ssid").ifEmpty { return err(Response.Status.BAD_REQUEST, "SSID required") }
             val upstreamPass = body.optString("password", "")
             val radioId = body.optString("radio", firstRadioId() ?: return err(Response.Status.BAD_REQUEST, "No radio found"))
+            // Encryption mode to join with, from the scan (psk2 / sae-mixed / psk / none).
+            // Hardcoding psk2 previously meant WPA3/mixed upstream networks never associated.
+            val validEnc = setOf("psk2", "sae-mixed", "sae", "psk", "psk-mixed", "none")
+            val upstreamEnc = body.optString("encryption", "").let {
+                if (it in validEnc) it else if (upstreamPass.isEmpty()) "none" else "psk2"
+            }
 
             val wireless = uciOf("wireless")
             val networkCfg = uciOf("network")
@@ -1619,8 +1654,12 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             uciAdd("wireless", staName, "wifi-iface")
             uciSet("wireless", staName, JSONObject()
                 .put("device", radioId).put("mode", "sta").put("network", "wwan")
-                .put("ssid", upstreamSsid)
-                .also { if (upstreamPass.isNotEmpty()) it.put("encryption", "psk2").put("key", upstreamPass) else it.put("encryption", "none") })
+                .put("ssid", upstreamSsid).put("disabled", "0")
+                .also {
+                    if (upstreamEnc != "none" && upstreamPass.isNotEmpty())
+                        it.put("encryption", upstreamEnc).put("key", upstreamPass)
+                    else it.put("encryption", "none")
+                })
 
             // The radio carries both the STA uplink and (on a single-radio router) the local
             // AP, so it MUST follow the upstream AP's channel. If it stays pinned to a fixed
