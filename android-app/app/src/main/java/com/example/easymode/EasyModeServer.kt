@@ -363,68 +363,15 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             }
         }
 
-        // Fetch Wi-Fi clients (MAC addresses) via iwinfo assoclist. Uses a UCI-based
-        // ifname fallback so it works on firmware without network.wireless.status.
-        val wifiMacs = collectWifiMacs()
-
-        val clientDevices = JSONArray()
+        // Connected devices, merged from luci-rpc (leases + host hints) and iwinfo
+        // assoclist — the same sources LuCI uses, so it works without file access.
+        val (clientDevices, available) = collectClients()
         var wiredCount = 0
-        var wirelessCount = wifiMacs.size
-        var available = false
-        var reason: String? = null
-
-        // Try reading DHCP leases and ARP via 'file' ubus namespace (requires rpcd-mod-file)
-        val arpRes = tryCall("file", "read", JSONObject().put("path", "/proc/net/arp"))
-        val leasesRes = tryCall("file", "read", JSONObject().put("path", "/tmp/dhcp.leases"))
-        
-        if (arpRes != null || leasesRes != null) {
-            available = true
-            val arpByMac = mutableMapOf<String, String>()
-            val arpData = arpRes?.optString("data", "") ?: ""
-            arpData.split("\n").drop(1).forEach { line ->
-                val parts = line.trim().split(Regex("\\s+"))
-                if (parts.size >= 4) {
-                    val ip = parts[0]; val flags = parts[2].toIntOrNull(16) ?: 0; val mac = parts[3].lowercase()
-                    if (mac != "00:00:00:00:00:00" && (flags and 0x2) != 0) arpByMac[mac] = ip
-                }
-            }
-            
-            val leaseData = leasesRes?.optString("data", "") ?: ""
-            leaseData.split("\n").forEach { line ->
-                val parts = line.trim().split(" ")
-                if (parts.size >= 4) {
-                    val mac = parts[1].lowercase()
-                    val ip = parts[2]
-                    val host = if (parts[3] != "*") parts[3] else null
-                    if (mac != "00:00:00:00:00:00") {
-                        clientDevices.put(JSONObject().put("mac", mac).put("ip", ip).put("hostname", host).put("isWireless", wifiMacs.contains(mac)))
-                        arpByMac.remove(mac) // consumed by DHCP
-                    }
-                }
-            }
-            
-            // Add remaining ARP entries that weren't in DHCP
-            arpByMac.forEach { (mac, ip) ->
-                clientDevices.put(JSONObject().put("mac", mac).put("ip", ip).put("hostname", JSONObject.NULL).put("isWireless", wifiMacs.contains(mac)))
-            }
-            
-            // Recompute counts based on actual seen devices
-            wiredCount = 0
-            wirelessCount = 0
-            for (i in 0 until clientDevices.length()) {
-                if (clientDevices.optJSONObject(i)?.optBoolean("isWireless", false) == true) wirelessCount++ else wiredCount++
-            }
-        } else {
-            // No file read access. Fallback to just showing Wi-Fi devices.
-            if (wifiMacs.isNotEmpty()) {
-                available = true
-                wifiMacs.forEach { mac ->
-                    clientDevices.put(JSONObject().put("mac", mac).put("ip", "-").put("hostname", "Wi-Fi Device").put("isWireless", true))
-                }
-            } else {
-                reason = "Client list requires router-side file access (rpcd-mod-file)"
-            }
+        var wirelessCount = 0
+        for (i in 0 until clientDevices.length()) {
+            if (clientDevices.optJSONObject(i)?.optBoolean("isWireless", false) == true) wirelessCount++ else wiredCount++
         }
+        val reason: String? = if (available) null else "Client list requires luci-rpc or file access on the router"
 
         // Compute CIDR and gateway for dashboard home-network panel
         val lanIpStr = ipv4(lanIface)
@@ -1020,29 +967,22 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         val rangeStart = "$prefix.$start"
         val rangeEnd = "$prefix.${start + limit - 1}"
 
-        // Build leases from DHCP leases file if available
+        // Connected devices, from luci-rpc (leases + host hints) + iwinfo assoclist —
+        // the same sources LuCI uses, so names and IPs show without file access.
+        val (clients, clientsAvailable) = collectClients()
         val leases = JSONArray()
-        var leasesAvailable = false
-        val leasesRes = tryCall("file", "read", JSONObject().put("path", "/tmp/dhcp.leases"))
-        if (leasesRes != null) {
-            leasesAvailable = true
-            val leaseData = leasesRes.optString("data", "")
-            leaseData.split("\n").forEach { line ->
-                val parts = line.trim().split(" ")
-                if (parts.size >= 4) {
-                    val mac = parts[1].lowercase()
-                    val ip = parts[2]
-                    val host = if (parts[3] != "*") parts[3] else null
-                    val expiry = parts[0].toLongOrNull()
-                    if (mac != "00:00:00:00:00:00") {
-                        leases.put(JSONObject()
-                            .put("mac", mac).put("ip", ip)
-                            .put("hostname", host).put("name", host)
-                            .put("expiresAt", if (expiry != null) expiry * 1000 else JSONObject.NULL)
-                            .put("reserved", false).put("blocked", false))
-                    }
-                }
-            }
+        val leasesAvailable = clientsAvailable
+        for (i in 0 until clients.length()) {
+            val c = clients.optJSONObject(i) ?: continue
+            val host = if (c.isNull("hostname")) null else c.optString("hostname")
+            leases.put(JSONObject()
+                .put("mac", c.optString("mac"))
+                .put("ip", if (c.isNull("ip")) JSONObject.NULL else c.optString("ip"))
+                .put("hostname", host).put("name", host)
+                .put("expiresAt", c.opt("leaseExpiresAt") ?: JSONObject.NULL)
+                .put("isWireless", c.optBoolean("isWireless", false))
+                .put("signal", c.opt("signal") ?: JSONObject.NULL)
+                .put("reserved", false).put("blocked", false))
         }
 
         // Check for blocked clients in firewall
@@ -1468,8 +1408,13 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
      * so it works even on firmware without network.wireless.status. Mirrors the ifname
      * resolution used by buildRadiosArray.
      */
-    private fun collectWifiMacs(): Set<String> {
-        val macs = mutableSetOf<String>()
+    /**
+     * Wi-Fi stations currently associated to any AP, keyed by lowercased MAC. Each value
+     * carries signal, ssid, radio id and connected seconds. Works without
+     * network.wireless.status by falling back to UCI-derived ifnames.
+     */
+    private fun collectWifiStations(): Map<String, JSONObject> {
+        val stations = mutableMapOf<String, JSONObject>()
         val wireless = uciOf("wireless")
         val netWireless = tryCall("network.wireless", "status") ?: JSONObject()
         wireless.keys().forEach { k ->
@@ -1483,10 +1428,11 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 if (iface.optString(".type") != "wifi-iface" || iface.optString("device") != k) return@forEach
                 val mode = iface.optString("mode", "ap")
                 if (mode != "ap") return@forEach
+                val ssid = iface.optString("ssid", "")
                 var ifname = iface.optString("ifname", "")
                 for (i in 0 until netInterfaces.length()) {
                     val cfg = netInterfaces.optJSONObject(i)?.optJSONObject("config") ?: continue
-                    if (cfg.optString(".name") == ik || cfg.optString("ssid") == iface.optString("ssid")) {
+                    if (cfg.optString(".name") == ik || cfg.optString("ssid") == ssid) {
                         val nIf = netInterfaces.optJSONObject(i)?.optString("ifname", "") ?: ""
                         if (nIf.isNotEmpty()) ifname = nIf
                     }
@@ -1497,12 +1443,119 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", ifname))
                 assoc?.optJSONArray("results")?.let { results ->
                     for (r in 0 until results.length()) {
-                        results.optJSONObject(r)?.optString("mac")?.lowercase()?.let { if (it.isNotEmpty()) macs.add(it) }
+                        val e = results.optJSONObject(r) ?: continue
+                        val mac = e.optString("mac").lowercase()
+                        if (mac.isEmpty()) continue
+                        stations[mac] = JSONObject()
+                            .put("signal", e.opt("signal"))
+                            .put("ssid", ssid).put("radio", k)
+                            .put("connectedSeconds", e.opt("connected_time"))
                     }
                 }
             }
         }
-        return macs
+        return stations
+    }
+
+    private fun collectWifiMacs(): Set<String> = collectWifiStations().keys
+
+    /**
+     * Merged view of connected devices, the way LuCI builds its client list: DHCP leases
+     * (luci-rpc getDHCPLeases, else the leases file) for IP/hostname/expiry, host hints
+     * (getHostHints) for names, and iwinfo assoclist for the wired/wireless split and
+     * signal. Returns a JSONArray of device objects and whether any source was reachable.
+     */
+    private fun collectClients(): Pair<JSONArray, Boolean> {
+        val stations = collectWifiStations()
+        // mac -> device object, so the same device from multiple sources merges.
+        val byMac = linkedMapOf<String, JSONObject>()
+        fun entryFor(mac: String): JSONObject = byMac.getOrPut(mac) {
+            JSONObject().put("mac", mac).put("ip", JSONObject.NULL)
+                .put("hostname", JSONObject.NULL).put("isWireless", stations.containsKey(mac))
+        }
+        var available = false
+
+        // 1. Host hints: MAC -> {name, ipv4, ipv6}. Best source of friendly names.
+        val hints = tryCall("luci-rpc", "getHostHints")
+        if (hints != null) {
+            available = true
+            hints.keys().forEach { mac ->
+                val h = hints.optJSONObject(mac) ?: return@forEach
+                val m = mac.lowercase()
+                val dev = entryFor(m)
+                val name = h.optString("name", "").ifEmpty { null }
+                if (name != null && dev.isNull("hostname")) dev.put("hostname", name)
+                val ipv4 = h.optString("ipv4", "").ifEmpty { h.optJSONArray("ipaddrs")?.optString(0, "") ?: "" }
+                if (ipv4.isNotEmpty() && dev.isNull("ip")) dev.put("ip", ipv4)
+            }
+        }
+
+        // 2. DHCP leases: authoritative IP/hostname/expiry.
+        val leaseArr = tryCall("luci-rpc", "getDHCPLeases")?.optJSONArray("dhcp_leases")
+        if (leaseArr != null) {
+            available = true
+            for (i in 0 until leaseArr.length()) {
+                val l = leaseArr.optJSONObject(i) ?: continue
+                val mac = l.optString("macaddr").lowercase()
+                if (mac.isEmpty()) continue
+                val dev = entryFor(mac)
+                val ip = l.optString("ipaddr", "")
+                if (ip.isNotEmpty()) dev.put("ip", ip)
+                val host = l.optString("hostname", "").ifEmpty { null }
+                if (host != null) dev.put("hostname", host)
+                val expires = l.optLong("expires", -1L)
+                // luci-rpc reports seconds remaining; convert to an absolute epoch ms.
+                dev.put("leaseExpiresAt", if (expires > 0) (System.currentTimeMillis() + expires * 1000) else JSONObject.NULL)
+            }
+        }
+
+        // 3. File fallback when luci-rpc is unavailable (needs rpcd-mod-file).
+        if (!available) {
+            val leasesRes = tryCall("file", "read", JSONObject().put("path", "/tmp/dhcp.leases"))
+            val arpRes = tryCall("file", "read", JSONObject().put("path", "/proc/net/arp"))
+            if (leasesRes != null || arpRes != null) {
+                available = true
+                (leasesRes?.optString("data", "") ?: "").split("\n").forEach { line ->
+                    val p = line.trim().split(" ")
+                    if (p.size >= 4 && p[1] != "00:00:00:00:00:00") {
+                        val dev = entryFor(p[1].lowercase())
+                        dev.put("ip", p[2])
+                        if (p[3] != "*") dev.put("hostname", p[3])
+                        p[0].toLongOrNull()?.let { dev.put("leaseExpiresAt", it * 1000) }
+                    }
+                }
+                (arpRes?.optString("data", "") ?: "").split("\n").drop(1).forEach { line ->
+                    val p = line.trim().split(Regex("\\s+"))
+                    if (p.size >= 4) {
+                        val flags = p[2].toIntOrNull(16) ?: 0
+                        val mac = p[3].lowercase()
+                        if (mac != "00:00:00:00:00:00" && (flags and 0x2) != 0) {
+                            val dev = entryFor(mac)
+                            if (dev.isNull("ip")) dev.put("ip", p[0])
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Ensure every associated Wi-Fi station shows even without a lease/hint.
+        stations.forEach { (mac, st) ->
+            available = true
+            val dev = entryFor(mac)
+            dev.put("isWireless", true)
+            dev.put("signal", st.opt("signal"))
+            dev.put("ssid", st.optString("ssid", ""))
+            dev.put("connectedSeconds", st.opt("connectedSeconds"))
+        }
+
+        // Normalise: fill the display IP, mark wired vs wireless.
+        val out = JSONArray()
+        byMac.values.forEach { dev ->
+            if (dev.isNull("ip")) dev.put("ip", "—")
+            dev.put("isWireless", stations.containsKey(dev.optString("mac")))
+            out.put(dev)
+        }
+        return Pair(out, available)
     }
 
     /**

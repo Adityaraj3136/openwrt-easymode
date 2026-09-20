@@ -815,8 +815,7 @@ svg { display: block; flex-shrink: 0; }
   .grid, .grid.wide, .grid.halves, .mode-grid { grid-template-columns: 1fr; }
   .radio-facts { grid-template-columns: repeat(2, 1fr); }
   .stepper-label { display: none; }
-  .modal-overlay { padding: 0; align-items: flex-end; }
-  .modal { max-width: none; border-radius: var(--r-lg) var(--r-lg) 0 0; max-height: 92vh; }
+  /* Mobile modal sheet layout lives in mobile.css (loaded after this file). */
   .toast-host { right: 12px; left: 12px; bottom: 12px; max-width: none; }
   /* Login: side-by-side -> stacked */
   .login-wrap { grid-template-columns: 1fr; }

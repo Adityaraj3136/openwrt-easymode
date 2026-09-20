@@ -467,7 +467,13 @@ function leasesPanel(status, handlers) {
                   el('div', { style: 'display:flex;align-items:center;gap:10px' }, [
                     icon(deviceGlyph(lease.hostname), { size: 17 }),
                     el('div', {}, [
-                      el('strong', { text: lease.hostname ?? 'Unnamed device' }),
+                      el('div', { style: 'display:flex;align-items:center;gap:6px' }, [
+                        el('strong', { text: lease.hostname ?? 'Unnamed device' }),
+                        icon(lease.isWireless ? 'wifi' : 'cable', { size: 13 }),
+                        lease.isWireless && Number.isFinite(lease.signal)
+                          ? el('span', { class: 'sub-note', style: 'margin:0', text: `${lease.signal} dBm` })
+                          : null,
+                      ]),
                       el('span', { class: 'mac', text: lease.mac ?? '' }),
                     ]),
                   ]),

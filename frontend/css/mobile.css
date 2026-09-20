@@ -232,12 +232,27 @@
 
 /* ── Modals: full-screen sheet on mobile ──────────────────── */
 @media (max-width: 860px) {
-  .modal-overlay { align-items: flex-end; padding: 0; padding-bottom: calc(54px + env(safe-area-inset-bottom, 0px)); }
+  /* The overlay must NOT scroll: it pins the sheet to the bottom and the sheet
+     scrolls its own body. An overlay that scrolls while aligning flex-end clips
+     the sheet's top out of reach. */
+  .modal-overlay {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 0;
+    overflow: hidden;
+  }
   .modal {
     border-radius: var(--r-lg) var(--r-lg) 0 0;
     max-width: 100% !important;
-    max-height: 80vh;
+    /* Leave room for the fixed bottom nav (54px) + safe area so nothing hides
+       behind it, and cap so head/body/foot stay on screen. */
+    max-height: calc(100dvh - 54px - env(safe-area-inset-bottom, 0px));
+    margin-bottom: calc(54px + env(safe-area-inset-bottom, 0px));
   }
+  /* Head and foot stay put; only the body scrolls. */
+  .modal-head, .modal-foot { flex: 0 0 auto; }
+  .modal-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   .modal-foot { flex-direction: column; gap: 8px; padding-bottom: 20px; }
   .modal-foot .btn { width: 100%; }
   /* Primary action on top on mobile */
