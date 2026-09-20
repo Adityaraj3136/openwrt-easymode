@@ -1717,10 +1717,11 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             // Kick the radio so the STA starts associating on the upstream channel.
             tryCall("file", "exec", JSONObject().put("command", "/sbin/wifi").put("params", JSONArray().put("reload")))
 
-            // Wait up to ~50s for association. This is generous because a cold radio restart
-            // plus scan/auth/assoc can take 20-40s on MT7986. No rollback timer is armed here
-            // (LAN is untouched, so the app stays connected at the same IP the whole time).
-            val assoc = waitForAssociation(radioId, System.currentTimeMillis() + 50_000)
+            // Wait up to ~70s for the uplink to associate AND pull a DHCP lease. Generous
+            // because a cold radio restart + scan/auth/assoc + DHCP can take 30-50s on MT7986.
+            // No rollback timer is armed here (LAN is untouched, so the app stays connected at
+            // the same IP the whole time).
+            val assoc = waitForAssociation(radioId, System.currentTimeMillis() + 70_000)
             if (assoc == null) {
                 // Uplink never joined — restore the previous wireless/network and report the
                 // honest, specific failure instead of a false success.
@@ -1995,16 +1996,36 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
     }
 
     /**
-     * Live association state of the STA (client) interface on [radioId] — i.e. whether the
-     * repeater uplink actually joined the upstream AP. Mirrors the PC's getStaState
-     * (backend/lib/modes/wireless-uplink.js): prefer the runtime ifname from
-     * network.wireless.status, fall back to the conventional phyN-sta0 name via
-     * resolveIfname, then ask iwinfo. Associated iff iwinfo reports a non-empty upstream SSID.
+     * Live association state of the repeater uplink on [radioId] — i.e. whether the STA
+     * actually joined the upstream AP AND pulled an address.
+     *
+     * The authoritative signal on this hardware is the `wwan` network interface being up
+     * with an IPv4 lease: that's what the dashboard uses (buildNetworkPayload) and it works
+     * on MediaTek vendor firmware, which lacks network.wireless.status and names the client
+     * interface apcliN (not the phyN-sta0 the OpenWrt iwinfo convention expects). We check
+     * that first, then fall back to iwinfo on a resolved STA ifname for stock OpenWrt.
      *
      * @return {ifname, ssid, signal} when associated, or null when not associated / no STA.
      */
     private fun staAssociated(radioId: String): JSONObject? {
-        // Resolve the STA ifname: runtime status first, then UCI convention.
+        // Primary: is the wwan uplink interface up with an IPv4 address? Proves the STA
+        // associated and got a lease — independent of the driver's interface naming.
+        val dump = tryCall("network.interface", "dump")
+        dump?.optJSONArray("interface")?.let { ifaces ->
+            for (i in 0 until ifaces.length()) {
+                val iface = ifaces.optJSONObject(i) ?: continue
+                val name = iface.optString("interface")
+                if (!name.matches(Regex("wwan.*|wan_sta.*|repeater.*", RegexOption.IGNORE_CASE))) continue
+                if (!iface.optBoolean("up")) continue
+                val v4 = iface.optJSONArray("ipv4-address")
+                if (v4 != null && v4.length() > 0) {
+                    return JSONObject().put("ifname", iface.optString("l3_device", iface.optString("device", name)))
+                        .put("ssid", JSONObject.NULL).put("signal", JSONObject.NULL)
+                }
+            }
+        }
+
+        // Fallback (stock OpenWrt): resolve the STA ifname and ask iwinfo for an upstream SSID.
         var ifname = ""
         tryCall("network.wireless", "status")?.optJSONObject(radioId)?.optJSONArray("interfaces")?.let { ifaces ->
             for (i in 0 until ifaces.length()) {
