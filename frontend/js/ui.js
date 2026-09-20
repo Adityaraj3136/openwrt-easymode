@@ -177,6 +177,20 @@ export function errorAlert(error) {
 
 export const signalText = (dbm) => (Number.isFinite(dbm) && dbm !== 0 ? `${dbm} dBm` : null);
 
+// A single document listener closes any open custom-select on an outside click.
+// Previously each select() added its own listener that was never removed, leaking one
+// listener per dropdown built across re-renders.
+let selectOutsideBound = false;
+function bindSelectOutsideClose() {
+  if (selectOutsideBound) return;
+  selectOutsideBound = true;
+  document.addEventListener('click', (event) => {
+    document.querySelectorAll('.custom-select.open').forEach((node) => {
+      if (!node.contains(event.target)) node.classList.remove('open');
+    });
+  });
+}
+
 export function select(options, selectedValue, extra = {}) {
   let currentValue = String(selectedValue ?? options[0]?.value ?? '');
   const getLabel = (v) => options.find(o => String(o.value) === String(v))?.label ?? v;
@@ -226,9 +240,7 @@ export function select(options, selectedValue, extra = {}) {
     wrapper.classList.toggle('open');
   });
 
-  document.addEventListener('click', (e) => {
-    if (!wrapper.contains(e.target)) wrapper.classList.remove('open');
-  });
+  bindSelectOutsideClose();
 
   return wrapper;
 }

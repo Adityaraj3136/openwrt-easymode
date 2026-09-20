@@ -246,6 +246,12 @@ export function renderBandwidth(container, { onUnauthorized }) {
   let timer = null;
 
   const load = async ({ poll = true } = {}) => {
+    // Cancel any pending poll so a manual reload (e.g. after saving limits) doesn't
+    // leave a second poll chain running alongside this one.
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
     try {
       const data = await api.bandwidth();
       if (stopped) return;

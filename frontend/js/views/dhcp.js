@@ -146,32 +146,23 @@ function serverPanel(status, { onSaved, onUnauthorized }) {
     hint: locked ? 'Your main router is handing out addresses.' : 'Gives your devices an address automatically.',
   });
 
-  const ipv6Enabled = toggle({
-    checked: status.ipv6Enabled,
-    disabled: locked,
-    label: 'IPv6 support',
-    hint: locked ? 'Managed by main router.' : 'Assigns IPv6 addresses and routing to devices.',
-  });
-
   const inputs = {
     start: el('input', { type: 'number', min: 2, max: 254, value: status.start, disabled: locked || false }),
     limit: el('input', { type: 'number', min: 1, max: 253, value: status.limit, disabled: locked || false }),
     leasetime: el('input', { value: status.leasetime, disabled: locked || false }),
-    dns: el('input', { value: status.dns.join(', '), placeholder: 'Router handles this', disabled: locked || false }),
+    dns: el('input', { value: (status.dns ?? []).join(', '), placeholder: 'Router handles this', disabled: locked || false }),
   };
 
   const errorSlot = el('div');
   const save = el('button', { class: 'btn btn-primary', disabled: locked || false }, ['Save changes']);
 
   save.addEventListener('click', async () => {
-    console.log('DHCP_TOGGLE_V2_LOADED');
     clear(errorSlot);
     save.disabled = true;
     save.textContent = 'Saving...';
     try {
       await api.updateDhcp({
         enabled: enabled.input.checked,
-        ipv6: false, // Hardcoded to false for pure IPv4 operation
         start: Number(inputs.start.value),
         limit: Number(inputs.limit.value),
         leasetime: inputs.leasetime.value,
@@ -206,7 +197,6 @@ function serverPanel(status, { onSaved, onUnauthorized }) {
           ])
         : null,
       enabled,
-      // IPv6 removed for pure IPv4 mode
       el('div', { style: 'height:18px' }),
       el('div', { class: 'stat-row' }, [
         el('div', { class: 'stat' }, [
@@ -231,6 +221,60 @@ function serverPanel(status, { onSaved, onUnauthorized }) {
       ]),
       errorSlot,
       el('div', { class: 'button-row', style: 'margin-top:14px' }, [save]),
+    ],
+  );
+}
+
+/* ============================================================
+   IPv6
+   ============================================================ */
+const IPV6_MODE = {
+  global: { label: 'On · via provider', tone: 'ok' },
+  local: { label: 'On · router-local', tone: 'accent' },
+  off: { label: 'Off', tone: 'neutral' },
+};
+
+function ipv6Panel(state, { onSaved, onUnauthorized }) {
+  if (!state) return null;
+
+  const errorSlot = el('div');
+  const meta = IPV6_MODE[state.mode] ?? IPV6_MODE.off;
+
+  const enabled = toggle({
+    checked: state.enabled,
+    label: 'IPv6 networking',
+    hint: 'Uses your provider’s IPv6 when available, otherwise router-local addresses.',
+  });
+
+  enabled.input.addEventListener('change', async () => {
+    const turnOn = enabled.input.checked;
+    clear(errorSlot);
+    enabled.input.disabled = true;
+    try {
+      const result = await api.updateIpv6({ enabled: turnOn });
+      toast(
+        turnOn ? 'IPv6 turned on' : 'IPv6 turned off — back to IPv4 only',
+        { tone: 'ok', detail: result?.description ?? null },
+      );
+      onSaved();
+    } catch (error) {
+      if (error.status === 401) return onUnauthorized();
+      enabled.input.checked = !turnOn;
+      enabled.input.disabled = false;
+      errorSlot.append(errorState(error));
+    }
+  });
+
+  return panel(
+    {
+      icon: icon('network', { size: 19 }),
+      title: 'IPv6',
+      trailing: badge(meta.label, meta.tone, { dot: false }),
+    },
+    [
+      el('p', { class: 'empty', style: 'margin-bottom:12px', text: state.description ?? '' }),
+      enabled,
+      errorSlot,
     ],
   );
 }
@@ -301,7 +345,7 @@ function reservationsPanel(status, handlers) {
     el('p', { class: 'empty', style: 'margin-bottom:12px' }, [
       el('span', { text: `A reserved address may sit outside the automatic range (${status.rangeStart ?? '—'} – ${status.rangeEnd ?? '—'}). That is normal: the router keeps it for that one device.` }),
     ]),
-    status.reservations.length
+    status.reservations?.length
       ? el('div', { class: 'table-wrap' }, [
           el('table', { class: 'data-table' }, [
             el('thead', {}, [el('tr', {}, [el('th', { text: 'Device' }), el('th', { text: 'IP address' }), el('th', {})])]),
@@ -440,7 +484,7 @@ function leasesPanel(status, handlers) {
       el('p', { class: 'empty', text: 'This router does not let EasyMode read the list of connected devices. Installing rpcd-mod-file enables it.' }),
     ]);
   }
-  if (!status.leases.length) {
+  if (!status.leases?.length) {
     return panel({ icon: icon('devices', { size: 19 }), title: 'Connected devices' }, [
       emptyState({ glyph: 'devices', title: 'No devices yet', message: 'Devices appear here once they connect and receive an address.' }),
     ]);
@@ -521,12 +565,16 @@ export function renderDhcp(container, { onUnauthorized }) {
 
   const load = async () => {
     try {
-      const [status, lan] = await Promise.all([api.dhcp(), api.lan().catch(() => null)]);
+      const [status, lan, ipv6] = await Promise.all([
+        api.dhcp(),
+        api.lan().catch(() => null),
+        api.ipv6().catch(() => null),
+      ]);
       const handlers = { onSaved: load, onUnauthorized };
       clear(body).append(
         el('div', { class: 'grid halves' }, [lanPanel(lan, handlers), serverPanel(status, handlers)].filter(Boolean)),
         el('div', { style: 'height:16px' }),
-        el('div', { class: 'grid halves' }, [reservationsPanel(status, handlers)]),
+        el('div', { class: 'grid halves' }, [reservationsPanel(status, handlers), ipv6Panel(ipv6, handlers)].filter(Boolean)),
         el('div', { style: 'height:16px' }),
         leasesPanel(status, handlers),
         ...(status.blocked?.length ? [el('div', { style: 'height:16px' }), blockedPanel(status, handlers)] : []),

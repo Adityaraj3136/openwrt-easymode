@@ -188,6 +188,8 @@ const FRIENDLY = {
   DHCP_MANAGED_ELSEWHERE: 'Your main router is handing out addresses while this router is an access point.',
   NO_WAN_LINK: 'No cable detected in the internet port.',
   UPLINK_NOT_ASSOCIATED: 'Could not join that Wi-Fi network. Check the password and signal.',
+  SCAN_BAND_BUSY: 'This band is connected to your main router, so it can’t scan for networks at the same time. Switch to the other band to scan.',
+  SCAN_FAILED: 'The router couldn’t scan for Wi-Fi networks right now. If this band also connects to your main router, try the other band.',
 };
 
 export const friendlyError = (error) => FRIENDLY[error?.code] ?? error?.message ?? 'Something went wrong.';

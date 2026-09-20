@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { errorState, skeletonCards } from '../components.js';
+import { errorState, skeletonCards, toast } from '../components.js';
 import { icon } from '../icons.js';
 import {
   badge,
@@ -8,7 +8,6 @@ import {
   dash,
   disclosure,
   el,
-  errorAlert,
   formatBytes,
   formatMbps,
   kv,
@@ -41,12 +40,15 @@ const deviceIcon = (name = '') => {
    ============================================================ */
 function topology({ mode, network, internet, wifi, bandwidth }) {
   const online = internet.online !== false;
+  const lan = network.lan ?? {};
+  const clients = lan.clients ?? {};
+  const radios = wifi?.radios ?? [];
   // Prefer the accurate wired/wireless split computed server-side (available after this fix).
   // Fall back to the legacy subtraction for older sessions.
-  const wifiClients = network.lan.clients.wirelessCount
-    ?? wifi.radios.reduce((sum, radio) => sum + (radio.clients ?? 0), 0);
-  const totalDevices = network.lan.clients.available ? network.lan.clients.count : null;
-  const wiredClients = network.lan.clients.wiredCount
+  const wifiClients = clients.wirelessCount
+    ?? radios.reduce((sum, radio) => sum + (radio.clients ?? 0), 0);
+  const totalDevices = clients.available ? clients.count : null;
+  const wiredClients = clients.wiredCount
     ?? (totalDevices == null ? null : Math.max(0, totalDevices - wifiClients));
 
   const down = formatMbps(bandwidth?.total?.rxRate);
@@ -77,7 +79,7 @@ function topology({ mode, network, internet, wifi, bandwidth }) {
       el('span', { class: 'mark' }, [icon('check', { size: 12 })]),
     ]),
     el('span', { class: 'topo-label', text: 'This router' }),
-    el('span', { class: 'topo-sub', text: network.lan.ip ?? dash }),
+    el('span', { class: 'topo-sub', text: lan.ip ?? dash }),
   ]);
 
   const paused = wifi?.repeaterPaused === true;
@@ -85,7 +87,7 @@ function topology({ mode, network, internet, wifi, bandwidth }) {
 
   const branch = el('div', { class: 'topo-branch' }, [
     el('div', { class: 'topo-node' }, [
-      el('div', { class: `topo-glyph ${wifi.radios.some((radio) => radio.enabled) ? 'live' : ''}` }, [icon('wifi', { size: 24 })]),
+      el('div', { class: `topo-glyph ${radios.some((radio) => radio.enabled) ? 'live' : ''}` }, [icon('wifi', { size: 24 })]),
       el('div', {}, [
         el('div', { class: 'topo-label', text: 'Wi-Fi' }),
         el('div', { class: 'topo-sub' }, [
@@ -129,8 +131,9 @@ function modeStrip(mode, onChangeMode) {
 }
 
 function internetPanel(network, internet, bandwidth) {
-  const wan = network.wan;
-  const viaMain = !wan.up && Boolean(network.lan.gateway);
+  const wan = network.wan ?? {};
+  const lan = network.lan ?? {};
+  const viaMain = !wan.up && Boolean(lan.gateway);
   const online = internet.online === true;
   const tone = online ? 'ok' : internet.online === false ? 'bad' : 'warn';
   const label = online ? 'Connected' : internet.online === false ? 'No internet' : 'Not verified';
@@ -164,8 +167,8 @@ function internetPanel(network, internet, bandwidth) {
       disclosure('View connection details', [
         kv([
           ['Connection', setupWord],
-          ['WAN IP address', wan.ip ?? network.lan.ip, 'mono'],
-          ['Gateway', wan.gateway ?? network.lan.gateway, 'mono'],
+          ['WAN IP address', wan.ip ?? lan.ip, 'mono'],
+          ['Gateway', wan.gateway ?? lan.gateway, 'mono'],
           ['DNS', wan.dns?.length ? wan.dns.join(', ') : null, 'mono'],
           ['Network port', wan.device],
           ['Cable plugged in', wan.carrier == null ? null : wan.carrier ? 'Yes' : 'No'],
@@ -178,8 +181,10 @@ function internetPanel(network, internet, bandwidth) {
 }
 
 function healthPanel(system) {
-  const cpu = system.cpu.percent;
-  const memory = system.memory.percent;
+  const sysCpu = system.cpu ?? {};
+  const sysMem = system.memory ?? {};
+  const cpu = sysCpu.percent;
+  const memory = sysMem.percent;
 
   return panel({ icon: icon('gauge', { size: 19 }), title: 'Router health' }, [
     el('div', { class: 'ring-row' }, [
@@ -194,7 +199,7 @@ function healthPanel(system) {
         ring(memory),
         el('div', { class: 'caption' }, [
           el('strong', { text: 'Memory' }),
-          el('span', { text: system.memory.total ? `${formatBytes(system.memory.used)} used` : 'Not available' }),
+          el('span', { text: sysMem.total ? `${formatBytes(sysMem.used)} used` : 'Not available' }),
         ]),
       ]),
     ]),
@@ -214,10 +219,10 @@ function healthPanel(system) {
         ['Router name', system.hostname],
         ['Full firmware', system.firmware],
         ['Load (1m / 5m / 15m)', system.load ? system.load.join(' / ') : null],
-        ['Memory total', system.memory.total ? formatBytes(system.memory.total) : null],
+        ['Memory total', sysMem.total ? formatBytes(sysMem.total) : null],
       ]),
-      system.cpu.percent == null && system.cpu.reason
-        ? el('p', { class: 'empty', style: 'margin-top:10px', text: system.cpu.reason })
+      cpu == null && sysCpu.reason
+        ? el('p', { class: 'empty', style: 'margin-top:10px', text: sysCpu.reason })
         : null,
     ], { key: 'dash.health' }),
   ]);
@@ -243,9 +248,9 @@ function wifiPanel(wifi, handlers, repeaterPaused) {
       const isConnected = sta?.up && !repeaterPaused;
       
       const statusBadge = repeaterPaused
-        ? badge('Disconnected', 'warning')
-        : radio.enabled 
-          ? (isConnected ? badge('Connected', 'ok') : badge('Connecting...', 'warning'))
+        ? badge('Disconnected', 'warn')
+        : radio.enabled
+          ? (isConnected ? badge('Connected', 'ok') : badge('Connecting...', 'warn'))
           : badge('Off', 'neutral');
 
       const toggleBtn = el('button', { 
@@ -274,7 +279,7 @@ function wifiPanel(wifi, handlers, repeaterPaused) {
               
               setTimeout(() => location.reload(), 1500);
             } catch (e) {
-              alert('Failed: ' + e.message);
+              toast(repeaterPaused ? 'Could not reconnect' : 'Could not disconnect', { tone: 'bad', detail: e.message });
               toggleBtn.disabled = false;
               toggleBtn.textContent = repeaterPaused ? 'Connect' : 'Disconnect';
             }
@@ -343,10 +348,12 @@ function wifiPanel(wifi, handlers, repeaterPaused) {
 }
 
 function devicesPanel(network, wifi, leases, onViewDevices) {
-  const wifiClients = network.lan.clients.wirelessCount
-    ?? wifi.radios.reduce((sum, radio) => sum + (radio.clients ?? 0), 0);
-  const total = network.lan.clients.available ? network.lan.clients.count : null;
-  const wired = network.lan.clients.wiredCount
+  const clients = network.lan?.clients ?? {};
+  const radios = wifi?.radios ?? [];
+  const wifiClients = clients.wirelessCount
+    ?? radios.reduce((sum, radio) => sum + (radio.clients ?? 0), 0);
+  const total = clients.available ? clients.count : null;
+  const wired = clients.wiredCount
     ?? (total == null ? null : Math.max(0, total - wifiClients));
 
   return panel(
@@ -370,11 +377,11 @@ function devicesPanel(network, wifi, leases, onViewDevices) {
           el('div', {}, [el('span', { text: 'Wired' }), el('strong', { text: wired == null ? dash : String(wired) })]),
         ]),
       ]),
-      network.lan.clients.devices?.length
+      clients.devices?.length
         ? el(
             'div',
             { class: 'device-list' },
-            network.lan.clients.devices.slice(0, 4).map((device) =>
+            clients.devices.slice(0, 4).map((device) =>
               el('div', { class: 'device-row' }, [
                 el('span', { class: 'ico' }, [icon(deviceIcon(device.hostname), { size: 18 })]),
                 el('span', { class: 'dn', text: device.hostname ?? 'Unnamed device' }),
@@ -382,38 +389,39 @@ function devicesPanel(network, wifi, leases, onViewDevices) {
               ]),
             ),
           )
-        : network.lan.clients.available
+        : clients.available
           ? null
-          : el('p', { class: 'empty', style: 'margin-top:12px', text: network.lan.clients.reason }),
+          : el('p', { class: 'empty', style: 'margin-top:12px', text: clients.reason }),
     ],
   );
 }
 
 function homeNetworkPanel(network, dhcp) {
+  const lan = network.lan ?? {};
   return panel({ icon: icon('network', { size: 19 }), title: 'Home network' }, [
     el('div', { class: 'stat-row' }, [
       el('div', { class: 'stat' }, [
         el('span', { class: 'label', text: 'Router address' }),
-        el('div', { class: 'value', style: 'font-size:19px', text: network.lan.ip ?? dash }),
+        el('div', { class: 'value', style: 'font-size:19px', text: lan.ip ?? dash }),
       ]),
       el('div', { class: 'stat' }, [
         el('span', { class: 'label', text: 'Addresses' }),
         el('div', { class: 'value', style: 'font-size:19px' }, [
-          network.lan.dhcpEnabled == null
+          lan.dhcpEnabled == null
             ? el('span', { text: dash })
-            : badge(network.lan.dhcpEnabled ? 'DHCP active' : 'Main router', network.lan.dhcpEnabled ? 'ok' : 'accent'),
+            : badge(lan.dhcpEnabled ? 'DHCP active' : 'Main router', lan.dhcpEnabled ? 'ok' : 'accent'),
         ]),
       ]),
     ]),
     disclosure('View network details', [
       kv([
-        ['Network range', network.lan.cidr, 'mono'],
+        ['Network range', lan.cidr, 'mono'],
         // The address range comes from the DHCP endpoint, which works it out from the
         // router's real netmask instead of assuming a /24.
         ['Addresses given out', dhcp?.rangeStart ? `${dhcp.rangeStart} – ${dhcp.rangeEnd}` : null, 'mono'],
         ['Lease time', dhcp?.leasetime],
-        ['Gateway', network.lan.gateway, 'mono'],
-        ['Network device', network.lan.device],
+        ['Gateway', lan.gateway, 'mono'],
+        ['Network device', lan.device],
       ]),
     ], { key: 'dash.network' }),
   ]);

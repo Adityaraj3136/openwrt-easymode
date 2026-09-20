@@ -6,6 +6,19 @@ import { MODES, modeById, modeCard } from './mode-cards.js';
 
 const STEPS = ['Connection', 'Home network', 'Wi-Fi', 'Review'];
 
+// Intervals started inside wizard steps (e.g. the disconnect countdown) are tracked here
+// so renderModeSetup's teardown can clear them when the user navigates away mid-countdown.
+const activeTimers = new Set();
+function trackInterval(fn, ms) {
+  const id = setInterval(fn, ms);
+  activeTimers.add(id);
+  return id;
+}
+function clearTrackedInterval(id) {
+  clearInterval(id);
+  activeTimers.delete(id);
+}
+
 const field = (label, input, hint) =>
   el('div', { class: 'field' }, [
     el('label', { text: label }),
@@ -164,7 +177,6 @@ function routerSteps(state, overview) {
     ssid: el('input', { value: state.wifiSsid ?? overview.defaults.wifiSsid ?? '' }),
     key: el('input', { type: 'password', value: state.wifiKey ?? overview.defaults.wifiKey ?? '', placeholder: 'At least 8 characters' }),
     macaddr: el('input', { placeholder: '00:11:22:33:44:55', value: state.macaddr ?? '' }),
-    ipv6: toggle({ checked: state.ipv6 !== false, label: 'Enable IPv6', hint: 'Keep this on if your provider supports IPv6.' }),
   };
 
   const CONNECTIONS = [
@@ -210,7 +222,7 @@ function routerSteps(state, overview) {
           stepHero('cable', 'How does the internet reach this router?', 'Plug the cable from your modem or main router into the internet (WAN) port.'),
           preflight.ready
             ? el('div', { style: 'margin-bottom:16px' }, [badge('Cable detected in the internet port', 'ok')])
-            : el('div', { class: 'alert alert-warning' }, [
+            : el('div', { class: 'alert alert-warn' }, [
                 icon('alert', { size: 18 }),
                 el('div', {}, [el('span', { text: preflight.reason ?? 'No cable detected in the internet port. You can still set up the router now and plug it in later.' })]),
               ]),
@@ -218,9 +230,6 @@ function routerSteps(state, overview) {
           pppoeBox,
           staticBox,
           advanced('Advanced settings', [
-            // IPv6 removed for pure IPv4 mode
-            // inputs.ipv6,
-            // el('div', { style: 'height:12px' }),
             field('MAC address clone', inputs.macaddr, 'Optional. Use when your ISP locks your connection to a specific device.'),
           ]),
         ]);
@@ -229,7 +238,6 @@ function routerSteps(state, overview) {
         // state.connection is updated by the change listener, but if it was never changed,
         // it might be undefined. Default it to 'auto' if so.
         if (!state.connection) state.connection = 'auto';
-        state.ipv6 = false; // Hardcoded to false
         state.pppoe = { username: inputs.pppoeUser.value, password: inputs.pppoePass.value };
         state.static = {
           ip: inputs.staticIp.value,
@@ -379,7 +387,6 @@ function wirelessSteps(state, overview, variant) {
     lanIp: el('input', { value: overview.defaults.lanIp ?? '' }),
     ssid: el('input', { value: state.wifiSsid ?? overview.defaults.wifiSsid ?? '' }),
     key: el('input', { type: 'password', value: state.wifiKey ?? overview.defaults.wifiKey ?? '', placeholder: 'At least 8 characters' }),
-    ipv6: toggle({ checked: state.ipv6 !== false, label: 'Enable IPv6', hint: 'Keep this on if your provider supports IPv6.' }),
   };
   const hotspot = variant === 'hotspot';
 
@@ -413,16 +420,16 @@ function wirelessSteps(state, overview, variant) {
                   try {
                     await api.disconnectRepeater();
                     let seconds = 65;
-                    const interval = setInterval(() => {
+                    const interval = trackInterval(() => {
                       seconds -= 1;
                       btn.textContent = `Applying... ${seconds}s`;
                       if (seconds <= 0) {
-                        clearInterval(interval);
+                        clearTrackedInterval(interval);
                         location.reload();
                       }
                     }, 1000);
                   } catch (e) {
-                    alert('Failed: ' + e.message);
+                    toast('Could not disconnect', { tone: 'bad', detail: e.message });
                     btn.disabled = false;
                     btn.textContent = 'Disconnect';
                   }
@@ -479,16 +486,12 @@ function wirelessSteps(state, overview, variant) {
             ]),
           ]),
           advanced('Advanced settings', [
-            // IPv6 removed for pure IPv4 mode
-            // inputs.ipv6,
-            // el('div', { style: 'height:12px' }),
             field('Router address', inputs.lanIp, 'Leave as it is unless you know you need a specific range.')
           ]),
         ]);
       },
       commit() {
         state.lanIp = inputs.lanIp.value.trim();
-        state.ipv6 = false; // Hardcoded to false
       },
     },
     wifiStep(state, inputs, 'Wi-Fi for your own devices'),
@@ -560,7 +563,7 @@ function buildPayload(modeId, state) {
     : { enabled: false };
 
   if (modeId === 'router') {
-    const payload = { connection: state.connection, lan: { leasetime: state.leasetime || '12h' }, wifi, ipv6: state.ipv6 !== false };
+    const payload = { connection: state.connection, lan: { leasetime: state.leasetime || '12h' }, wifi };
     if (state.lanIp) payload.lan.ip = state.lanIp;
     if (state.connection === 'pppoe') payload.pppoe = state.pppoe;
     if (state.connection === 'static') payload.static = state.static;
@@ -581,7 +584,6 @@ function buildPayload(modeId, state) {
     encryption: state.encryption ?? 'psk2',
     lan: state.lanIp ? { ip: state.lanIp } : {},
     wifi,
-    ipv6: state.ipv6 !== false,  // forward the user's IPv6 toggle choice to the backend
   };
 }
 
@@ -819,5 +821,10 @@ export function renderModeSetup(container, { onUnauthorized }) {
   };
 
   showOverview();
-  return () => cancelPolling?.();
+  return () => {
+    cancelPolling?.();
+    // Stop any in-flight countdown so it can't fire location.reload() after teardown.
+    for (const id of activeTimers) clearInterval(id);
+    activeTimers.clear();
+  };
 }

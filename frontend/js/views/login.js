@@ -1,5 +1,6 @@
 import { api } from '../api.js';
-import { clear, el, errorAlert } from '../ui.js';
+import { errorState } from '../components.js';
+import { clear, el } from '../ui.js';
 
 const MODE_CHIPS = ['Router', 'Access Point', 'Wireless Repeater', 'Phone Hotspot'];
 
@@ -30,7 +31,7 @@ export function renderLogin(root, { defaultHost = '192.168.1.1', demoAvailable =
           passInput.value = '';
           onConnected(session);
         } catch (error) {
-          errorSlot.append(errorAlert(error));
+          errorSlot.append(errorState(error));
           submit.disabled = false;
           submit.textContent = 'Connect to router';
         }
@@ -77,7 +78,7 @@ export function renderLogin(root, { defaultHost = '192.168.1.1', demoAvailable =
                     try {
                       onConnected(await api.login({ host: 'demo', username: 'demo', password: '' }));
                     } catch (error) {
-                      errorSlot.append(errorAlert(error));
+                      errorSlot.append(errorState(error));
                     }
                   },
                   text: 'Explore with a simulated router',

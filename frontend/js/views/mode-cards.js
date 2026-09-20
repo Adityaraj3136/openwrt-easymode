@@ -121,7 +121,8 @@ export function modeCard(mode, { current, available, onSelect, uplink }) {
             }
             setTimeout(() => location.reload(), 1500);
           } catch (e) {
-            alert(`Failed: ` + e.message);
+            const { toast } = await import('../components.js');
+            toast(isPaused ? 'Could not reconnect' : 'Could not disconnect', { tone: 'bad', detail: e.message });
             toggleBtn.disabled = false;
             toggleBtn.textContent = isPaused ? 'Connect' : 'Disconnect';
           }

@@ -17,7 +17,10 @@ import org.json.JSONObject
  * Persistence: router IP and session ID are stored in SharedPreferences so they
  * survive the Android process being killed and restarted.
  */
-class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) {
+// Bind to loopback only: the WebView loads http://localhost:8080, which resolves to
+// 127.0.0.1. The port-only constructor would bind 0.0.0.0 (all interfaces), exposing
+// router control to every device on the LAN. Loopback removes remote reachability.
+class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0.0.1", port) {
 
     private val ubus = UbusClient()
     private val prefs = context.getSharedPreferences("easymode", Context.MODE_PRIVATE)
@@ -96,9 +99,9 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     // ── Response helpers ──────────────────────────────────────
     private fun ok(obj: JSONObject) = newFixedLengthResponse(Response.Status.OK, "application/json", obj.toString())
     private fun ok(s: String) = newFixedLengthResponse(Response.Status.OK, "application/json", s)
-    private fun err(status: Response.Status, msg: String): Response =
+    private fun err(status: Response.Status, msg: String, code: String = "ERROR"): Response =
         newFixedLengthResponse(status, "application/json",
-            JSONObject().put("error", JSONObject().put("code", "ERROR").put("message", msg)).toString())
+            JSONObject().put("error", JSONObject().put("code", code).put("message", msg)).toString())
 
     // ── Ubus helpers ──────────────────────────────────────────
     private fun tryCall(obj: String, method: String, args: JSONObject? = null): JSONObject? =
@@ -185,13 +188,19 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             try { session.parseBody(bodyMap) } catch (_: Exception) {}
         val body = runCatching { JSONObject(bodyMap["postData"] ?: "{}") }.getOrDefault(JSONObject())
 
-        // Check session via cookie OR via stored SID (for session restoration)
+        // Check session via cookie matching the stored SID.
         val cookieSid = session.cookies.read("sysauth_http") ?: ""
         val storedSid = activeSid
-        val isPublic = uri == "/api/auth/config" || uri == "/api/auth/login"
+        // Public endpoints need no session. /api/auth/session is also allowed through here:
+        // it self-authenticates by re-validating the stored SID against the router, and it
+        // must work right after an app restart when the (session-scoped) cookie is gone.
+        val isPublic = uri == "/api/auth/config" || uri == "/api/auth/login" ||
+            uri == "/api/auth/session"
 
-        // Session is valid if cookie matches stored SID and SID is not empty
-        val sessionValid = storedSid.isNotEmpty() && (cookieSid == storedSid || cookieSid.isEmpty())
+        // Every data endpoint now requires the cookie to match the stored SID. The old
+        // `|| cookieSid.isEmpty()` bypass — which treated a cookie-less request as valid —
+        // has been removed so a request without the session cookie can't reach the router.
+        val sessionValid = storedSid.isNotEmpty() && cookieSid == storedSid
         if (!isPublic && !sessionValid)
             return err(Response.Status.UNAUTHORIZED, "Session expired. Please log in again.")
 
@@ -268,6 +277,8 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         if (uri == "/api/dhcp" && method == Method.POST) return updateDhcp(body)
         if (uri == "/api/lan" && method == Method.GET) return buildLan()
         if (uri == "/api/lan" && method == Method.POST) return updateLan(body)
+        if (uri == "/api/ipv6" && method == Method.GET) return buildIpv6()
+        if (uri == "/api/ipv6" && method == Method.POST) return updateIpv6(body)
         if (uri == "/api/dhcp/reservations" && method == Method.POST) return addReservation(body)
         if (uri.startsWith("/api/dhcp/reservations/") && method == Method.DELETE)
             return deleteReservation(uri.removePrefix("/api/dhcp/reservations/"))
@@ -701,19 +712,31 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
 
     private fun buildWifiScan(radioId: String?): Response {
         val radio = radioId ?: firstRadioId() ?: return ok(JSONObject().put("networks", JSONArray()).put("joinable", JSONObject()).put("congestion", JSONObject()))
-        
-        val netWireless = tryCall("network.wireless", "status") ?: JSONObject()
-        var scanDevice = radio
-        val radioObj = netWireless.optJSONObject(radio)
-        if (radioObj != null) {
-            val ifaces = radioObj.optJSONArray("interfaces")
-            if (ifaces != null && ifaces.length() > 0) {
-                val ifname = ifaces.optJSONObject(0)?.optString("ifname", "") ?: ""
-                if (ifname.isNotEmpty()) scanDevice = ifname
-            }
+
+        // Pick the interface to scan on. A radio acting as a STA (client) uplink — the band
+        // used to connect to the main router in repeater mode — is busy on the associated
+        // channel and cannot scan; scanning there fails or drops the uplink. So prefer an AP
+        // interface, and if the radio ONLY has a STA interface, report a clear error instead
+        // of silently returning an empty list.
+        val (scanDevice, staOnly) = resolveScanInterface(radio)
+        if (staOnly) {
+            return err(Response.Status.INTERNAL_ERROR,
+                "This band is connected to your main router, so it can't scan for networks at the same time. Switch to the other band to scan.",
+                "SCAN_BAND_BUSY")
         }
-        
+        if (scanDevice.isEmpty()) {
+            return err(Response.Status.INTERNAL_ERROR,
+                "No Wi-Fi interface is available on this band to scan with.", "SCAN_FAILED")
+        }
+
         val scan = tryCall("iwinfo", "scan", JSONObject().put("device", scanDevice))
+        if (scan == null) {
+            // The scan call itself failed. On a radio that also carries a STA uplink this is
+            // usually the busy-band conflict; surface it rather than an empty success.
+            return err(Response.Status.INTERNAL_ERROR,
+                "The router couldn't scan for Wi-Fi networks right now. If this band is also used to connect to your main router, try the other band.",
+                "SCAN_FAILED")
+        }
         val networks = JSONArray()
         scan?.optJSONArray("results")?.let { results ->
             for (i in 0 until results.length()) {
@@ -1088,6 +1111,138 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         if (body.has("netmask")) values.put("netmask", body.getString("netmask"))
         uciSet("network", "lan", values); uciCommit("network"); uciApply()
         return buildLan()
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // IPv6
+    // ═══════════════════════════════════════════════════════════
+    /** Section key of the LAN dhcp block, e.g. "lan". Falls back to "lan". */
+    private fun lanDhcpSectionKey(): String {
+        val dhcpCfg = uciOf("dhcp")
+        return dhcpCfg.keys().asSequence().firstOrNull { k ->
+            dhcpCfg.optJSONObject(k)?.let { it.optString(".type") == "dhcp" && (it.optString("interface") == "lan" || it.optString(".name") == "lan") } == true
+        } ?: "lan"
+    }
+
+    /**
+     * Current IPv6 state. `enabled` reflects whether odhcpd serves IPv6 to the LAN
+     * (dhcp.lan.ra/dhcpv6 set to "server"). `mode` is "global" when an upstream IPv6
+     * interface (wan6/wwan6) exists, else "local" (router-generated ULA only), else "off".
+     */
+    private fun buildIpv6(): Response {
+        val dhcpCfg = uciOf("dhcp")
+        val lanSec = dhcpCfg.optJSONObject(lanDhcpSectionKey())
+        val ra = lanSec?.optString("ra", "")?.lowercase() ?: ""
+        val dhcpv6 = lanSec?.optString("dhcpv6", "")?.lowercase() ?: ""
+        val enabled = ra == "server" || ra == "relay" || dhcpv6 == "server" || dhcpv6 == "relay"
+
+        val networkCfg = uciOf("network")
+        val hasUplink6 = networkCfg.keys().asSequence().any { k ->
+            networkCfg.optJSONObject(k)?.optString("proto") == "dhcpv6"
+        }
+        val mode = when {
+            !enabled -> "off"
+            hasUplink6 -> "global"
+            else -> "local"
+        }
+        val supported = firstRadioId() != null || networkCfg.length() > 0
+        return ok(JSONObject().put("enabled", enabled).put("mode", mode)
+            .put("supported", true)
+            .put("description", when (mode) {
+                "global" -> "IPv6 is on. Devices get internet IPv6 addresses from your provider."
+                "local" -> "IPv6 is on. Your provider has no IPv6, so devices get router-local (ULA) addresses only."
+                else -> "IPv6 is off. All devices use IPv4 only."
+            }))
+    }
+
+    /**
+     * Enable or disable IPv6. Enable: LAN serves RA + DHCPv6 (clients get ULA immediately,
+     * or global addresses if an upstream IPv6 prefix is available), and a wan6 uplink is
+     * created when a wan interface exists. Disable: fully revert to IPv4 — stop RA/DHCPv6,
+     * turn off kernel IPv6 on LAN, and remove the wan6/wwan6 uplink so routing drops back
+     * to IPv4 (this full revert is what was missing before). odhcpd is restarted either way
+     * so the change takes effect without clients reconnecting.
+     */
+    private fun updateIpv6(body: JSONObject): Response {
+        val enable = body.optBoolean("enabled", false)
+        val lanKey = lanDhcpSectionKey()
+        val networkCfg = uciOf("network")
+
+        if (enable) {
+            // Kernel IPv6 on the LAN interface, and odhcpd serving RA + DHCPv6 to clients.
+            uciSet("network", "lan", JSONObject().put("ipv6", "1"))
+            uciSet("dhcp", lanKey, JSONObject()
+                .put("ra", "server").put("dhcpv6", "server").put("ndp", "disabled"))
+
+            // Create an upstream IPv6 client on the wan device when a wan interface exists
+            // (wired router mode). In AP/repeater mode there's no wan; ULA still works.
+            val wan = networkCfg.optJSONObject("wan")
+            if (wan != null) {
+                val wanDevice = wan.optString("device", "").ifEmpty { wan.optString("ifname", "") }
+                val values = JSONObject().put("proto", "dhcpv6")
+                    .put("reqaddress", "try").put("reqprefix", "auto")
+                if (wanDevice.isNotEmpty()) values.put("device", wanDevice) else values.put("device", "@wan")
+                uciEnsure("network", "wan6", "interface", values)
+                addToWanZone("wan6")
+            }
+            uciCommit("network", "dhcp", "firewall"); uciApply()
+        } else {
+            // Full revert to IPv4: stop serving IPv6, drop kernel IPv6 on LAN, remove uplinks.
+            uciSet("network", "lan", JSONObject().put("ipv6", "0"))
+            uciSet("dhcp", lanKey, JSONObject()
+                .put("ra", "disabled").put("dhcpv6", "disabled").put("ndp", "disabled"))
+            // Remove any dhcpv6 uplink interfaces so the default route drops to IPv4.
+            networkCfg.keys().asSequence().filter { k ->
+                networkCfg.optJSONObject(k)?.optString("proto") == "dhcpv6"
+            }.toList().forEach { k ->
+                uciDelete("network", k)
+                removeFromWanZone(k)
+            }
+            uciCommit("network", "dhcp", "firewall"); uciApply()
+        }
+
+        // Restart odhcpd so RA/DHCPv6 changes reach clients immediately (an unsolicited RA
+        // is sent), and reload network so wan6 is picked up / torn down. Without this the
+        // toggle appears to do nothing until clients reconnect.
+        tryCall("file", "exec", JSONObject().put("command", "/etc/init.d/network").put("params", JSONArray().put("reload")))
+        tryCall("file", "exec", JSONObject().put("command", "/etc/init.d/odhcpd").put("params", JSONArray().put("restart")))
+        return buildIpv6()
+    }
+
+    /** Add [network] to the firewall "wan" zone's network list, if not already present. */
+    private fun addToWanZone(network: String) {
+        val firewall = uciOf("firewall")
+        val zoneKey = firewall.keys().asSequence().firstOrNull { k ->
+            firewall.optJSONObject(k)?.let { it.optString(".type") == "zone" && it.optString("name") == "wan" } == true
+        } ?: return
+        val zone = firewall.optJSONObject(zoneKey) ?: return
+        val nets = mutableListOf<String>()
+        when (val raw = zone.opt("network")) {
+            is JSONArray -> for (i in 0 until raw.length()) nets.add(raw.optString(i))
+            is String -> raw.split(" ").filter { it.isNotEmpty() }.forEach { nets.add(it) }
+        }
+        if (nets.isEmpty()) nets.add("wan")
+        if (!nets.contains(network)) {
+            nets.add(network)
+            uciSet("firewall", zoneKey, JSONObject().put("network", JSONArray(nets)))
+        }
+    }
+
+    /** Remove [network] from the firewall "wan" zone's network list, if present. */
+    private fun removeFromWanZone(network: String) {
+        val firewall = uciOf("firewall")
+        val zoneKey = firewall.keys().asSequence().firstOrNull { k ->
+            firewall.optJSONObject(k)?.let { it.optString(".type") == "zone" && it.optString("name") == "wan" } == true
+        } ?: return
+        val zone = firewall.optJSONObject(zoneKey) ?: return
+        val nets = mutableListOf<String>()
+        when (val raw = zone.opt("network")) {
+            is JSONArray -> for (i in 0 until raw.length()) nets.add(raw.optString(i))
+            is String -> raw.split(" ").filter { it.isNotEmpty() }.forEach { nets.add(it) }
+        }
+        if (nets.remove(network)) {
+            uciSet("firewall", zoneKey, JSONObject().put("network", JSONArray(nets)))
+        }
     }
 
     private fun addReservation(body: JSONObject): Response {
@@ -1666,6 +1821,61 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             }
         }
         return candidates.first()
+    }
+
+    /**
+     * Choose an interface on [radioId] to run an iwinfo scan on. Prefers an AP interface,
+     * because a STA (client) interface — the band connected upstream in repeater mode — is
+     * busy on its associated channel and cannot scan.
+     *
+     * Returns (ifname, staOnly): ifname is the interface to scan on (empty if none found);
+     * staOnly is true when the radio has interfaces but they are all STA/client mode, i.e.
+     * this band is dedicated to the uplink and scanning is not possible.
+     */
+    private fun resolveScanInterface(radioId: String): Pair<String, Boolean> {
+        var apIface = ""
+        var sawSta = false
+        var sawAp = false
+
+        // 1. Prefer live runtime info from network.wireless.status when available.
+        val netWireless = tryCall("network.wireless", "status") ?: JSONObject()
+        netWireless.optJSONObject(radioId)?.optJSONArray("interfaces")?.let { ifaces ->
+            for (i in 0 until ifaces.length()) {
+                val iface = ifaces.optJSONObject(i) ?: continue
+                val mode = iface.optJSONObject("config")?.optString("mode", "")
+                    ?: iface.optString("mode", "")
+                val ifname = iface.optString("ifname", "")
+                when (mode.lowercase()) {
+                    "ap" -> { sawAp = true; if (apIface.isEmpty() && ifname.isNotEmpty()) apIface = ifname }
+                    "sta", "client", "mesh" -> sawSta = true
+                }
+            }
+        }
+
+        // 2. Fall back to UCI wifi-ifaces when status didn't give us an AP ifname.
+        if (apIface.isEmpty()) {
+            val wireless = uciOf("wireless")
+            var apIndex = 0
+            wireless.keys().forEach { ik ->
+                val iface = wireless.optJSONObject(ik) ?: return@forEach
+                if (iface.optString(".type") != "wifi-iface" || iface.optString("device") != radioId) return@forEach
+                val mode = iface.optString("mode", "ap")
+                if (mode == "ap") {
+                    sawAp = true
+                    val if0 = iface.optString("ifname", "").ifEmpty { resolveIfname(radioId, "ap", apIndex) }
+                    if (apIface.isEmpty() && if0.isNotEmpty()) apIface = if0
+                    apIndex++
+                } else {
+                    sawSta = true
+                }
+            }
+        }
+
+        if (apIface.isNotEmpty()) return Pair(apIface, false)
+        // No AP interface: if the only interfaces are STA, this band can't scan.
+        if (sawSta && !sawAp) return Pair("", true)
+        // No interfaces resolved at all — last resort, let iwinfo try the radio id.
+        return Pair(radioId, false)
     }
 
     /**
