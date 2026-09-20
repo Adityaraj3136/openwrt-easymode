@@ -326,7 +326,7 @@ Install with `npm install`. See `package.json` for exact versions.
 |---|---|
 | **Hotspot mode not implemented** | Would require USB tethering kernel modules not present on most routers |
 | **No HTTPS to router** | Communicates with router over plain HTTP (local network only — acceptable risk) |
-| **uci apply rollback timer** | Mode changes have a 10-second rollback window. If the router becomes unreachable after applying, it will revert automatically |
+| **uci apply rollback timer** | Risky changes (mode switch to Router/Repeater, LAN IP, IPv6) are applied behind OpenWrt's `uci apply` rollback timer. The app reconnects and confirms only if the router still answers; if it goes unreachable, the router auto-reverts to the previous settings. Switching to Access Point mode is exempt — its LAN address moves to a DHCP-assigned one, so reconnect-based verification can't reliably tell success from failure |
 | **Single-router only** | The app manages one router at a time. Multi-router / mesh not supported |
 
 ---

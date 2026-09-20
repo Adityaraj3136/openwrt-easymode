@@ -665,15 +665,19 @@ function progressView(container, jobId, modeId, { onDone }) {
         );
         toast('Mode configured successfully', { tone: 'ok' });
       } else {
+        const autoReverted = modeId === 'router' || modeId === 'repeater';
+        const recovery = job.recovery ?? (autoReverted
+          ? 'Your previous settings were restored.'
+          : 'Check the router at its previous address; you may need to reconnect or reset it.');
         body.append(
           el('div', { class: 'result bad' }, [
             el('strong', { text: 'Setup did not complete.' }),
             el('span', { text: job.error ?? 'Unknown error.' }),
-            el('span', { text: job.recovery ?? 'Your previous settings were restored.' }),
+            el('span', { text: recovery }),
           ]),
           el('button', { class: 'btn btn-ghost', style: 'margin-top:16px', onclick: onDone, text: 'Back to modes' }),
         );
-        toast('Setup failed — previous settings restored', { tone: 'bad' });
+        toast(autoReverted ? 'Setup failed — previous settings restored' : 'Setup failed', { tone: 'bad' });
       }
     } catch (error) {
       if (stopped) return;
@@ -788,10 +792,16 @@ export function renderModeSetup(container, { onUnauthorized }) {
           return;
         }
 
+        // Router/Repeater keep a fixed LAN address, so the app can reconnect and the
+        // router auto-reverts if the change locks it out. Access Point mode takes a new
+        // address from the main router, so there is no safe auto-revert to promise.
+        const autoReverts = modeId === 'router' || modeId === 'repeater';
         const confirmed = await confirmDialog({
           title: `Switch to ${meta.title} mode?`,
           message: 'Your devices lose connection for a few seconds while the router applies the change.',
-          detail: 'If the new settings do not work, the router restores the previous ones by itself.',
+          detail: autoReverts
+            ? 'If the new settings lock the router out, it restores the previous ones by itself.'
+            : 'This router will take a new address from your main router. Note the address shown when setup finishes — you will need it to open EasyMode again.',
           confirmLabel: 'Apply setup',
         });
         if (!confirmed) return;

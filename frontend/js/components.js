@@ -190,6 +190,8 @@ const FRIENDLY = {
   UPLINK_NOT_ASSOCIATED: 'Could not join that Wi-Fi network. Check the password and signal.',
   SCAN_BAND_BUSY: 'This band is connected to your main router, so it can’t scan for networks at the same time. Switch to the other band to scan.',
   SCAN_FAILED: 'The router couldn’t scan for Wi-Fi networks right now. If this band also connects to your main router, try the other band.',
+  // CHANGE_REVERTED is intentionally not mapped: the backend sends a context-specific
+  // message per operation (LAN IP / IPv6 / each mode), which friendlyError falls back to.
 };
 
 export const friendlyError = (error) => FRIENDLY[error?.code] ?? error?.message ?? 'Something went wrong.';

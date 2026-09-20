@@ -157,6 +157,173 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
         catch (_: Exception) {}
     }
 
+    // ── Rollback primitives ───────────────────────────────────
+    // OpenWrt's own safety net: `uci apply {rollback:true, timeout:N}` stages the change
+    // and arms a timer. If `uci confirm` is not called within N seconds, the router reverts
+    // everything on its own — the real protection against a change that locks us out.
+
+    /**
+     * Apply staged changes behind the rollback timer. Returns true if the router accepted
+     * the rollback-armed apply, false if this build doesn't support it (caller should then
+     * fall back to a plain commit + snapshot restore). Throws only on transport failure.
+     */
+    private fun uciApplyConfirm(timeoutSeconds: Int): Boolean {
+        return try {
+            ubus.call(activeRouterIp, activeSid, "uci", "apply",
+                JSONObject().put("rollback", true).put("timeout", timeoutSeconds))
+            true
+        } catch (e: Exception) {
+            // Some vendor rpcd builds advertise apply/confirm/rollback but return NO_DATA
+            // (ubus code 6) when actually called. Treat that as "not supported".
+            false
+        }
+    }
+
+    /** Commit the staged change for good, cancelling the rollback timer. */
+    private fun uciConfirm(): Boolean =
+        try { ubus.call(activeRouterIp, activeSid, "uci", "confirm", JSONObject()); true }
+        catch (_: Exception) { false }
+
+    /** Immediately revert the staged change instead of waiting for the timer. */
+    private fun uciRollback(): Boolean =
+        try { ubus.call(activeRouterIp, activeSid, "uci", "rollback", JSONObject()); true }
+        catch (_: Exception) { false }
+
+    // ── Config snapshot / restore (fallback for builds without rollback) ──
+    // When the router lacks uci apply/confirm/rollback we can't rely on its timer, so we
+    // capture the affected configs before the change and write them back if the new state
+    // turns out wrong. This only helps while the router is still reachable — it is not a
+    // substitute for the rollback timer's lock-out protection, just a best effort.
+
+    private val META_KEYS = setOf(".name", ".type", ".anonymous", ".index")
+
+    /** Options of a section minus ubus metadata keys. */
+    private fun optionsOf(section: JSONObject): JSONObject {
+        val out = JSONObject()
+        section.keys().forEach { k -> if (k !in META_KEYS) out.put(k, section.get(k)) }
+        return out
+    }
+
+    /** Read the given configs into an in-memory snapshot. */
+    private fun snapshotConfigs(vararg configs: String): JSONObject {
+        val snap = JSONObject()
+        configs.forEach { cfg -> snap.put(cfg, uciOf(cfg)) }
+        return snap
+    }
+
+    /**
+     * Write a snapshot back section by section: restore known options, remove options and
+     * sections that appeared after the snapshot was taken. Does NOT commit/apply — the
+     * caller decides how to persist (so it can reuse the same rollback path).
+     */
+    private fun restoreSnapshot(snapshot: JSONObject) {
+        snapshot.keys().forEach { config ->
+            val sections = snapshot.optJSONObject(config) ?: return@forEach
+            val current = uciOf(config)
+
+            sections.keys().forEach { name ->
+                val section = sections.optJSONObject(name) ?: return@forEach
+                val wanted = optionsOf(section)
+                val existing = current.optJSONObject(name)
+                if (existing == null) {
+                    uciEnsure(config, name, section.optString(".type"), wanted)
+                } else {
+                    // Drop options that were added after the snapshot.
+                    optionsOf(existing).keys().forEach { opt ->
+                        if (!wanted.has(opt)) uciDeleteOption(config, name, opt)
+                    }
+                    if (wanted.length() > 0) uciSet(config, name, wanted)
+                }
+            }
+            // Remove sections that didn't exist in the snapshot.
+            current.keys().forEach { name ->
+                if (!sections.has(name)) uciDelete(config, name)
+            }
+        }
+    }
+
+    /**
+     * Probe for the router after a change, following it to a new address if it moved
+     * (e.g. a LAN IP change). Tries the current IP plus any candidates, retrying until one
+     * answers or the deadline passes. Updates activeRouterIp on success. Returns true if the
+     * router is reachable again.
+     *
+     * Bounded by an absolute wall-clock deadline (not an attempt count) because each failed
+     * ubus.call burns up to the OkHttp connect timeout (~5s). When called under an armed
+     * rollback timer, the caller passes a deadline safely inside that timer so we always
+     * return with time left to send confirm/rollback — never after the router self-reverted.
+     */
+    private fun reconnectAfterChange(candidates: List<String>, deadline: Long, delayMs: Long = 1500): Boolean {
+        val hosts = (listOf(activeRouterIp) + candidates).filter { it.isNotEmpty() }.distinct()
+        while (true) {
+            for (h in hosts) {
+                try {
+                    ubus.call(h, activeSid, "system", "board")
+                    if (h != activeRouterIp) { activeRouterIp = h; invalidateCaches() }
+                    return true
+                } catch (_: Exception) {}
+                if (System.currentTimeMillis() >= deadline) return false
+            }
+            if (System.currentTimeMillis() + delayMs >= deadline) return false
+            try { Thread.sleep(delayMs) } catch (_: InterruptedException) {}
+        }
+    }
+
+    /**
+     * Commit staged UCI changes behind the rollback timer, wait for the router to settle,
+     * confirm that it still answers (following it to a new address if given), optionally
+     * verify the new state, then confirm the change. If contact is lost we never confirm,
+     * so the router's own timer reverts everything — the lock-out protection. On builds
+     * without rollback we fall back to a plain commit plus snapshot restore on failure.
+     *
+     * Callers must have already STAGED their changes (uciSet/uciDelete/uciEnsure) and must
+     * NOT have committed — the rollback-armed apply performs the commit.
+     *
+     * @return true if the change was applied and confirmed; false if it was reverted.
+     */
+    private fun commitWithRollback(
+        configs: List<String>,
+        candidates: List<String> = emptyList(),
+        timeoutSeconds: Int = 90,
+        settleMs: Long = 2500,
+        verify: (() -> Boolean)? = null,
+    ): Boolean {
+        // Restore point for the no-rollback fallback path.
+        val snapshot = snapshotConfigs(*configs.toTypedArray())
+        val armed = uciApplyConfirm(timeoutSeconds)
+
+        if (!armed) {
+            // rpcd lacks apply/confirm/rollback: commit directly and reload, then verify.
+            // No rollback timer here, so probe generously (30s) — there's nothing to race.
+            uciCommit(*configs.toTypedArray()); uciApply()
+            try { Thread.sleep(settleMs) } catch (_: InterruptedException) {}
+            if (!reconnectAfterChange(candidates, System.currentTimeMillis() + 30_000)) return false
+            if (verify != null && !verify()) {
+                restoreSnapshot(snapshot); uciCommit(*configs.toTypedArray()); uciApply()
+                return false
+            }
+            return true
+        }
+
+        // Rollback armed: we MUST confirm (or rollback) before the router's timer fires, or
+        // it reverts on its own and our confirm would be a lie. Reserve a safety margin so
+        // the reconnect probe always finishes with time left to send confirm/rollback.
+        val margin = 10_000L
+        val deadline = System.currentTimeMillis() + (timeoutSeconds * 1000L) - margin
+
+        try { Thread.sleep(settleMs) } catch (_: InterruptedException) {}
+        if (!reconnectAfterChange(candidates, deadline)) {
+            // Lost contact — do NOT confirm. The router reverts itself when the timer fires.
+            return false
+        }
+        if (verify != null && !verify()) {
+            uciRollback()
+            return false
+        }
+        uciConfirm()
+        return true
+    }
+
     private fun capabilities() = JSONObject().put("features", JSONObject()
         .put("wirelessControl", true).put("wifiSchedule", false)
         .put("fileRead", false).put("cpuUsage", false))
@@ -1109,7 +1276,19 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
         val values = JSONObject()
         if (body.has("ip")) values.put("ipaddr", body.getString("ip"))
         if (body.has("netmask")) values.put("netmask", body.getString("netmask"))
-        uciSet("network", "lan", values); uciCommit("network"); uciApply()
+        uciSet("network", "lan", values)
+
+        // Changing the router address moves this very page. Apply behind the rollback timer
+        // and follow the router to the new IP; if it never answers there, we don't confirm
+        // and the router restores its old address by itself — so a typo can't lock you out.
+        val newIp = if (body.has("ip")) body.getString("ip") else ""
+        val applied = commitWithRollback(listOf("network"),
+            candidates = if (newIp.isNotEmpty()) listOf(newIp) else emptyList())
+        if (!applied) {
+            return err(Response.Status.INTERNAL_ERROR,
+                "The router didn't answer at the new address, so it put the old one back.",
+                "CHANGE_REVERTED")
+        }
         return buildLan()
     }
 
@@ -1185,7 +1364,6 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
                 uciEnsure("network", "wan6", "interface", values)
                 addToWanZone("wan6")
             }
-            uciCommit("network", "dhcp", "firewall"); uciApply()
         } else {
             // Full revert to IPv4: stop serving IPv6, drop kernel IPv6 on LAN, remove uplinks.
             uciSet("network", "lan", JSONObject().put("ipv6", "0"))
@@ -1198,7 +1376,17 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
                 uciDelete("network", k)
                 removeFromWanZone(k)
             }
-            uciCommit("network", "dhcp", "firewall"); uciApply()
+        }
+
+        // Apply behind the rollback timer. The IPv6 toggle never moves the router's own
+        // address (LAN IPv4 is untouched), so no candidate IPs are needed. If applying it
+        // somehow makes the router unreachable, commitWithRollback declines to confirm and
+        // the router reverts to the pre-toggle state on its own.
+        val applied = commitWithRollback(listOf("network", "dhcp", "firewall"))
+        if (!applied) {
+            return err(Response.Status.INTERNAL_ERROR,
+                "The IPv6 change didn't stick, so the router put your previous settings back.",
+                "CHANGE_REVERTED")
         }
 
         // Restart odhcpd so RA/DHCPv6 changes reach clients immediately (an unsolicited RA
@@ -1312,7 +1500,13 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
                 dhcpCfg.optJSONObject(k)?.let { it.optString(".type") == "dhcp" && (it.optString("interface") == "lan" || it.optString(".name") == "lan") } == true
             } ?: "lan"
             uciSet("dhcp", lanDhcpKey, JSONObject().put("ignore", "0"))
-            uciCommit("wireless", "network", "dhcp"); uciApply()
+            // Router mode keeps the LAN address static, so the router stays reachable at the
+            // same IP. Apply behind the rollback timer; if it somehow stops answering, the
+            // change is not confirmed and the router restores the previous mode itself.
+            val applied = commitWithRollback(listOf("wireless", "network", "dhcp"))
+            if (!applied) return err(Response.Status.INTERNAL_ERROR,
+                "The router didn't come back after switching to Router mode, so it restored your previous setup.",
+                "CHANGE_REVERTED")
             ok(JSONObject().put("mode", "router").put("ok", true).put("pending", true))
         } catch (e: Exception) {
             err(Response.Status.INTERNAL_ERROR, "Mode switch failed: ${e.message}")
@@ -1342,6 +1536,12 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
                 if (s.optString(".type") == "wifi-iface" && s.optString("mode") == "sta")
                     uciDelete("wireless", k)
             }
+            // NOTE: AP mode deliberately does NOT use commitWithRollback. Switching to AP
+            // turns the LAN into a DHCP client, so the router gets a new, unpredictable
+            // address from the upstream router. A reconnect probe at the old IP would fail
+            // even on a fully successful switch, which would wrongly trigger a rollback.
+            // Until we can discover the new address reliably (mDNS/ARP scan), AP applies
+            // directly. The router's own apply timer still isn't armed here.
             uciCommit("wireless", "network", "dhcp"); uciApply()
             ok(JSONObject().put("mode", "ap").put("ok", true).put("pending", true))
         } catch (e: Exception) {
@@ -1392,7 +1592,14 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             } ?: "lan"
             uciSet("dhcp", lanDhcpKey, JSONObject().put("ignore", "0"))
 
-            uciCommit("wireless", "network", "dhcp"); uciApply()
+            // The repeater keeps its own LAN address, so the app reconnects at the same IP
+            // even while the STA is still associating upstream. Wi-Fi restarts during the
+            // switch, so allow a longer settle before probing. If the router never answers
+            // again, the rollback timer restores the previous mode on its own.
+            val applied = commitWithRollback(listOf("wireless", "network", "dhcp"), settleMs = 6000)
+            if (!applied) return err(Response.Status.INTERNAL_ERROR,
+                "The router didn't come back after switching to Repeater mode, so it restored your previous setup.",
+                "CHANGE_REVERTED")
             ok(JSONObject().put("mode", "repeater").put("ok", true).put("pending", true)
                 .put("message", "Connecting to \"$upstreamSsid\"... Router will apply settings."))
         } catch (e: Exception) {
