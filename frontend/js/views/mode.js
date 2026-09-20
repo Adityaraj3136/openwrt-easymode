@@ -475,6 +475,15 @@ function wirelessSteps(state, overview, variant) {
     },
     {
       render() {
+        const ipv6Toggle = toggle({
+          checked: Boolean(state.ipv6),
+          label: 'Pass through IPv6',
+          hint: `Let devices get IPv6 addresses from ${hotspot ? 'your phone' : 'the network you joined'}, when it offers them. Leave off for plain IPv4 — turn it on later in Devices if you are unsure.`,
+          onChange: (checked) => {
+            state.ipv6 = checked;
+          },
+        });
+
         return el('div', {}, [
           stepHero('network', 'Your home network', 'Devices connect to this router and get their addresses from it.'),
           el('div', { class: 'alert alert-info' }, [
@@ -485,6 +494,7 @@ function wirelessSteps(state, overview, variant) {
               }),
             ]),
           ]),
+          ipv6Toggle,
           advanced('Advanced settings', [
             field('Router address', inputs.lanIp, 'Leave as it is unless you know you need a specific range.')
           ]),
@@ -503,6 +513,7 @@ function wirelessSteps(state, overview, variant) {
             ['Mode', hotspot ? 'Mobile Hotspot' : 'Wi-Fi Repeater'],
             [hotspot ? 'Phone hotspot' : 'Network to extend', state.ssid],
             ['Router address', state.lanIp || overview.defaults.lanIp],
+            ['IPv6', state.ipv6 ? 'On (when available)' : 'Off (IPv4 only)'],
             ['Wi-Fi for your devices', state.changeWifi ? state.wifiSsid : 'Left unchanged'],
           ]),
         ]);
@@ -582,6 +593,7 @@ function buildPayload(modeId, state) {
     ssid: state.ssid,
     key: state.password ?? '',
     encryption: state.encryption ?? 'psk2',
+    ipv6: Boolean(state.ipv6),
     lan: state.lanIp ? { ip: state.lanIp } : {},
     wifi,
   };

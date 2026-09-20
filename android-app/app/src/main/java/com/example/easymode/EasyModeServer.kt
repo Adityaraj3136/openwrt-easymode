@@ -1627,27 +1627,47 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
                 networkCfg.optJSONObject(k)?.optString(".name") == "wwan" ||
                 networkCfg.has("wwan")
             }
+            // IPv6 pass-through is opt-in from the setup wizard (default off = plain IPv4).
+            val wantIpv6 = body.optBoolean("ipv6", false)
+
             if (!wwanExists) uciAdd("network", "wwan", "interface")
-            uciSet("network", "wwan", JSONObject().put("proto", "dhcp").put("ipv6", "0"))
+            uciSet("network", "wwan", JSONObject().put("proto", "dhcp").put("ipv6", if (wantIpv6) "1" else "0"))
 
             // Coming from AP mode the LAN is a DHCP client; repeater needs a static LAN so
-            // it stays reachable and can route. Keep IPv6 off on LAN to stop RA leaks from
-            // the shared radio (matches the PC repeater plan).
-            uciSet("network", "lan", JSONObject().put("proto", "static").put("ipv6", "0"))
+            // it stays reachable and can route. LAN kernel IPv6 follows the user's choice —
+            // off stops RA leaks from the shared radio (matches the PC repeater plan).
+            uciSet("network", "lan", JSONObject().put("proto", "static").put("ipv6", if (wantIpv6) "1" else "0"))
 
-            // LAN clients get their addresses from THIS router; disable IPv6 serving.
+            // LAN clients get their addresses from THIS router. Serve or suppress IPv6 (RA +
+            // DHCPv6) to match the choice; ndp stays disabled (we route, not relay).
             val dhcpCfg = uciOf("dhcp")
             val lanDhcpKey = dhcpCfg.keys().asSequence().firstOrNull { k ->
                 dhcpCfg.optJSONObject(k)?.let { it.optString(".type") == "dhcp" && (it.optString("interface") == "lan" || it.optString(".name") == "lan") } == true
             } ?: "lan"
             uciSet("dhcp", lanDhcpKey, JSONObject()
-                .put("ignore", "0").put("dhcpv6", "disabled").put("ra", "disabled").put("ndp", "disabled"))
+                .put("ignore", "0")
+                .put("dhcpv6", if (wantIpv6) "server" else "disabled")
+                .put("ra", if (wantIpv6) "server" else "disabled")
+                .put("ndp", "disabled"))
             // Drop any stale relay config left by a previous setup.
             uciDelete("dhcp", "wwan")
 
             // Internet sharing: NAT the uplink like a WAN port and forward lan→wan. Without
             // this the STA associates but LAN clients get no route out — the reported drop.
             ensureWanNatForUplink("wwan")
+
+            // When IPv6 is requested, add a DHCPv6 client on the uplink so the router pulls a
+            // prefix from upstream (falls back to router-local ULA if the network offers none)
+            // and put it in the wan firewall zone. When off, remove any stale uplink6.
+            if (wantIpv6) {
+                uciEnsure("network", "wwan6", "interface", JSONObject()
+                    .put("device", "@wwan").put("proto", "dhcpv6")
+                    .put("reqaddress", "try").put("reqprefix", "auto"))
+                ensureWanNatForUplink("wwan6")
+            } else {
+                uciDelete("network", "wwan6")
+                removeFromWanZone("wwan6")
+            }
 
             // The repeater keeps its own LAN address, so the app reconnects at the same IP
             // even while the STA is still associating upstream. Wi-Fi restarts during the
@@ -1657,6 +1677,14 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             if (!applied) return err(Response.Status.INTERNAL_ERROR,
                 "The router didn't come back after switching to Repeater mode, so it restored your previous setup.",
                 "CHANGE_REVERTED")
+
+            // When IPv6 was enabled, restart odhcpd so RA/DHCPv6 reaches clients without a
+            // reconnect and reload network so the wwan6 uplink comes up (matches updateIpv6).
+            if (wantIpv6) {
+                tryCall("file", "exec", JSONObject().put("command", "/etc/init.d/network").put("params", JSONArray().put("reload")))
+                tryCall("file", "exec", JSONObject().put("command", "/etc/init.d/odhcpd").put("params", JSONArray().put("restart")))
+            }
+
             ok(JSONObject().put("mode", "repeater").put("ok", true).put("pending", true)
                 .put("message", "Connecting to \"$upstreamSsid\"... Router will apply settings."))
         } catch (e: Exception) {
