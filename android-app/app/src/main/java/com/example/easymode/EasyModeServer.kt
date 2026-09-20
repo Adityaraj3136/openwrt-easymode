@@ -603,6 +603,7 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             val interfaces = JSONArray()
             var primarySsid: String? = null
             var clients = 0
+            var apIndex = 0
 
             val netRadio = netWireless.optJSONObject(k)
             val netInterfaces = netRadio?.optJSONArray("interfaces") ?: JSONArray()
@@ -610,11 +611,11 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             wireless.keys().forEach { ik ->
                 val iface = wireless.optJSONObject(ik) ?: return@forEach
                 val iType = iface.optString(".type").ifEmpty { if (ik.matches(Regex("radio\\d+"))) "wifi-device" else "wifi-iface" }
-                
+
                 if (iType == "wifi-iface" && iface.optString("device") == k) {
                     val mode = iface.optString("mode", "ap")
                     val ssid = iface.optString("ssid", null)
-                    
+
                     var realIfname = iface.optString("ifname", "")
                     for (i in 0 until netInterfaces.length()) {
                         val netIface = netInterfaces.optJSONObject(i) ?: continue
@@ -624,14 +625,22 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                             if (nIf.isNotEmpty()) realIfname = nIf
                         }
                     }
-                    
+
+                    // Vendor firmware (e.g. JioRouter AX6000) doesn't expose
+                    // network.wireless.status, so no runtime ifname is discoverable above and
+                    // the UCI section rarely carries one. Derive it so assoclist — and thus the
+                    // connected-device count — still works.
+                    if (realIfname.isEmpty()) realIfname = resolveIfname(k, mode, apIndex)
+
                     if (mode == "ap" && primarySsid == null) primarySsid = ssid
-                    
+
                     if (detailed && realIfname.isNotEmpty()) {
                         val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", realIfname))
                         clients += assoc?.optJSONArray("results")?.length() ?: 0
                     }
-                    
+
+                    if (mode == "ap") apIndex++
+
                     val nwStr = iface.optString("network", "")
                     val nwArr = iface.optJSONArray("network")
                     val netList = nwArr ?: if (nwStr.isNotEmpty()) JSONArray().put(nwStr) else JSONArray()
@@ -780,13 +789,17 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         if (body.has("channel")) deviceValues.put("channel", body.opt("channel"))
         if (body.has("txpower")) deviceValues.put("txpower", body.opt("txpower"))
         if (body.has("htmode")) deviceValues.put("htmode", body.optString("htmode"))
+        if (body.has("country") && body.optString("country").isNotEmpty()) deviceValues.put("country", body.optString("country").uppercase())
         if (body.has("enabled")) deviceValues.put("disabled", if (body.optBoolean("enabled")) "0" else "1")
         if (deviceValues.length() > 0) uciSet("wireless", radioId, deviceValues)
 
-        // Update AP interface: ssid, key, encryption, hidden, isolate, enabled
+        // Update AP interface: ssid, key, encryption, hidden, isolate, enabled.
+        // mode defaults to "ap": a UCI wifi-iface with no explicit `option mode` IS an AP,
+        // so matching on optString("mode") (empty default) would skip it and silently drop
+        // every SSID/password/security change.
         wireless.keys().forEach { k ->
             val s = wireless.optJSONObject(k) ?: return@forEach
-            if (s.optString(".type") != "wifi-iface" || s.optString("device") != radioId || s.optString("mode") != "ap") return@forEach
+            if (s.optString(".type") != "wifi-iface" || s.optString("device") != radioId || s.optString("mode", "ap") != "ap") return@forEach
             val ifaceValues = JSONObject()
             if (body.has("ssid")) ifaceValues.put("ssid", body.getString("ssid"))
             if (body.has("encryption")) ifaceValues.put("encryption", body.optString("encryption"))
@@ -799,6 +812,11 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             if (ifaceValues.length() > 0) uciSet("wireless", k, ifaceValues)
         }
         uciCommit("wireless"); uciApply()
+        // Nudge the wireless subsystem so the new settings take effect immediately.
+        // uci apply reloads via config triggers on stock OpenWrt, but vendor firmware
+        // often needs an explicit reload; both are best-effort.
+        tryCall("network.wireless", "reload")
+        tryCall("file", "exec", JSONObject().put("command", "/sbin/wifi").put("params", JSONArray().put("reload")))
         return ok(JSONObject().put("ok", true).put("pending", true))
     }
 
@@ -1351,6 +1369,23 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     private fun firstRadioId(): String? {
         val wireless = uciOf("wireless")
         return wireless.keys().asSequence().firstOrNull { k -> wireless.optJSONObject(k)?.optString(".type") == "wifi-device" }
+    }
+
+    /**
+     * Best-effort runtime interface name for a wifi-iface when network.wireless.status
+     * is unavailable. Tries the conventional OpenWrt names (phy0-ap0, wlan0, …) and the
+     * radio id itself, returning the first that iwinfo recognises.
+     */
+    private fun resolveIfname(radioId: String, mode: String, apIndex: Int): String {
+        val idx = radioId.filter { it.isDigit() }.ifEmpty { "0" }
+        val m = if (mode == "sta") "sta" else "ap"
+        val n = if (mode == "sta") 0 else apIndex
+        val candidates = listOf("phy$idx-$m$n", "phy$idx-${m}0", "wlan$idx", radioId)
+        for (c in candidates) {
+            val info = tryCall("iwinfo", "info", JSONObject().put("device", c))
+            if (info != null && info.length() > 0) return c
+        }
+        return candidates.first()
     }
 
     private fun formatUptime(seconds: Long): String {

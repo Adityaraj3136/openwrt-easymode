@@ -172,6 +172,8 @@ function openRadioEditor(radio, { onSaved, onUnauthorized }) {
       if (inputs.channel) payload.channel = inputs.channel.value;
       if (inputs.htmode) payload.htmode = inputs.htmode.value;
       if (inputs.txpower) payload.txpower = Number(inputs.txpower.value);
+      if (inputs.isolate) payload.isolate = inputs.isolate.input.checked;
+      if (inputs.country && inputs.country.value.trim()) payload.country = inputs.country.value.trim();
 
       await api.updateRadio(radio.id, payload);
       modal.close();
