@@ -1622,6 +1622,13 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
                 .put("ssid", upstreamSsid)
                 .also { if (upstreamPass.isNotEmpty()) it.put("encryption", "psk2").put("key", upstreamPass) else it.put("encryption", "none") })
 
+            // The radio carries both the STA uplink and (on a single-radio router) the local
+            // AP, so it MUST follow the upstream AP's channel. If it stays pinned to a fixed
+            // channel that doesn't match the network we're joining, the STA never associates
+            // and there's no internet — the exact failure we saw. 'auto' lets it follow the
+            // STA's channel. (PC: wireless-uplink.js connectUplink.)
+            uciSet("wireless", radioId, JSONObject().put("disabled", "0").put("channel", "auto"))
+
             // Create wwan network interface only if it doesn't already exist
             val wwanExists = networkCfg.keys().asSequence().any { k ->
                 networkCfg.optJSONObject(k)?.optString(".name") == "wwan" ||
@@ -1637,6 +1644,10 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             // it stays reachable and can route. LAN kernel IPv6 follows the user's choice —
             // off stops RA leaks from the shared radio (matches the PC repeater plan).
             uciSet("network", "lan", JSONObject().put("proto", "static").put("ipv6", if (wantIpv6) "1" else "0"))
+            // Drop any static gateway/DNS left on LAN by a previous router-mode setup: the
+            // default route must come from the wwan uplink's DHCP lease, not a stale LAN one.
+            uciDeleteOption("network", "lan", "gateway")
+            uciDeleteOption("network", "lan", "dns")
 
             // LAN clients get their addresses from THIS router. Serve or suppress IPv6 (RA +
             // DHCPv6) to match the choice; ndp stays disabled (we route, not relay).
@@ -1677,6 +1688,11 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             if (!applied) return err(Response.Status.INTERNAL_ERROR,
                 "The router didn't come back after switching to Repeater mode, so it restored your previous setup.",
                 "CHANGE_REVERTED")
+
+            // Reload wifi so the radio restarts on the upstream channel and the STA actually
+            // begins associating. uci apply usually does this, but an explicit reload makes
+            // the uplink come up reliably across firmware variants (matches the PC flow).
+            tryCall("file", "exec", JSONObject().put("command", "/sbin/wifi").put("params", JSONArray().put("reload")))
 
             // When IPv6 was enabled, restart odhcpd so RA/DHCPv6 reaches clients without a
             // reconnect and reload network so the wwan6 uplink comes up (matches updateIpv6).
