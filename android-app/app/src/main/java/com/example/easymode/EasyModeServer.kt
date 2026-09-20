@@ -1397,6 +1397,51 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
         return buildIpv6()
     }
 
+    /**
+     * Set up internet sharing for a wireless/wired uplink treated as WAN: ensure a "wan"
+     * firewall zone exists with masquerading (NAT) enabled, add [uplinkNet] to it, make the
+     * "lan" zone permissive, and ensure a lan→wan forwarding rule. Without this the STA
+     * associates upstream but LAN clients have no NAT/route out — the internet "drops".
+     * Mirrors the PC repeater plan (backend/lib/modes/wireless-uplink.js stageNetwork).
+     */
+    private fun ensureWanNatForUplink(uplinkNet: String) {
+        val firewall = uciOf("firewall")
+        fun findKey(type: String, match: (JSONObject) -> Boolean): String? =
+            firewall.keys().asSequence().firstOrNull { k ->
+                firewall.optJSONObject(k)?.let { it.optString(".type") == type && match(it) } == true
+            }
+
+        // WAN zone: create if missing, always (re)assert NAT + safe policies + network list.
+        val wanKey = findKey("zone") { it.optString("name") == "wan" }
+        val existingNets = mutableListOf<String>()
+        if (wanKey != null) {
+            when (val raw = firewall.optJSONObject(wanKey)?.opt("network")) {
+                is JSONArray -> for (i in 0 until raw.length()) existingNets.add(raw.optString(i))
+                is String -> raw.split(" ").filter { it.isNotEmpty() }.forEach { existingNets.add(it) }
+            }
+        }
+        if (!existingNets.contains(uplinkNet)) existingNets.add(uplinkNet)
+        val wanValues = JSONObject()
+            .put("name", "wan").put("masq", "1").put("mtu_fix", "1")
+            .put("input", "REJECT").put("output", "ACCEPT").put("forward", "REJECT")
+            .put("network", JSONArray(existingNets))
+        if (wanKey != null) uciSet("firewall", wanKey, wanValues)
+        else uciEnsure("firewall", "wan", "zone", wanValues)
+
+        // LAN zone: permissive so local clients are served and can be forwarded out.
+        val lanKey = findKey("zone") { it.optString("name") == "lan" }
+        if (lanKey != null) {
+            uciSet("firewall", lanKey, JSONObject()
+                .put("input", "ACCEPT").put("output", "ACCEPT").put("forward", "ACCEPT"))
+        }
+
+        // lan → wan forwarding rule (the actual route out for local devices).
+        if (findKey("forwarding") { it.optString("src") == "lan" && it.optString("dest") == "wan" } == null) {
+            uciEnsure("firewall", "lan_wan_fwd", "forwarding", JSONObject()
+                .put("src", "lan").put("dest", "wan"))
+        }
+    }
+
     /** Add [network] to the firewall "wan" zone's network list, if not already present. */
     private fun addToWanZone(network: String) {
         val firewall = uciOf("firewall")
@@ -1585,18 +1630,30 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             if (!wwanExists) uciAdd("network", "wwan", "interface")
             uciSet("network", "wwan", JSONObject().put("proto", "dhcp").put("ipv6", "0"))
 
-            // Keep DHCP for LAN clients
+            // Coming from AP mode the LAN is a DHCP client; repeater needs a static LAN so
+            // it stays reachable and can route. Keep IPv6 off on LAN to stop RA leaks from
+            // the shared radio (matches the PC repeater plan).
+            uciSet("network", "lan", JSONObject().put("proto", "static").put("ipv6", "0"))
+
+            // LAN clients get their addresses from THIS router; disable IPv6 serving.
             val dhcpCfg = uciOf("dhcp")
             val lanDhcpKey = dhcpCfg.keys().asSequence().firstOrNull { k ->
                 dhcpCfg.optJSONObject(k)?.let { it.optString(".type") == "dhcp" && (it.optString("interface") == "lan" || it.optString(".name") == "lan") } == true
             } ?: "lan"
-            uciSet("dhcp", lanDhcpKey, JSONObject().put("ignore", "0"))
+            uciSet("dhcp", lanDhcpKey, JSONObject()
+                .put("ignore", "0").put("dhcpv6", "disabled").put("ra", "disabled").put("ndp", "disabled"))
+            // Drop any stale relay config left by a previous setup.
+            uciDelete("dhcp", "wwan")
+
+            // Internet sharing: NAT the uplink like a WAN port and forward lan→wan. Without
+            // this the STA associates but LAN clients get no route out — the reported drop.
+            ensureWanNatForUplink("wwan")
 
             // The repeater keeps its own LAN address, so the app reconnects at the same IP
             // even while the STA is still associating upstream. Wi-Fi restarts during the
             // switch, so allow a longer settle before probing. If the router never answers
             // again, the rollback timer restores the previous mode on its own.
-            val applied = commitWithRollback(listOf("wireless", "network", "dhcp"), settleMs = 6000)
+            val applied = commitWithRollback(listOf("wireless", "network", "dhcp", "firewall"), settleMs = 6000)
             if (!applied) return err(Response.Status.INTERNAL_ERROR,
                 "The router didn't come back after switching to Repeater mode, so it restored your previous setup.",
                 "CHANGE_REVERTED")
