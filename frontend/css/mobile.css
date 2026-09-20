@@ -232,13 +232,13 @@
 
 /* ── Modals: full-screen sheet on mobile ──────────────────── */
 @media (max-width: 860px) {
-  .modal-overlay { align-items: flex-end; padding: 0; }
+  .modal-overlay { align-items: flex-end; padding: 0; padding-bottom: calc(54px + env(safe-area-inset-bottom, 0px)); }
   .modal {
     border-radius: var(--r-lg) var(--r-lg) 0 0;
     max-width: 100% !important;
-    max-height: 88vh;
+    max-height: 80vh;
   }
-  .modal-foot { flex-direction: column; gap: 8px; }
+  .modal-foot { flex-direction: column; gap: 8px; padding-bottom: 20px; }
   .modal-foot .btn { width: 100%; }
   /* Primary action on top on mobile */
   .modal-foot .btn-primary { order: -1; }

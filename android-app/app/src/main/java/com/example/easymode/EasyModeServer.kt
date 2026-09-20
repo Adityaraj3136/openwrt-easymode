@@ -664,12 +664,7 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 .put("channelConfig", s.optString("channel", "auto"))
                 .put("clients", clients)
                 .put("interfaces", interfaces)
-                .put("capabilities", JSONObject()
-                    .put("supports", JSONObject().put("channel", false).put("txpower", false))
-                    .put("widthOptions", JSONArray())
-                    .put("channels", JSONArray())
-                    .put("txpower", JSONObject().put("min", 0).put("max", 0))
-                )
+                .put("capabilities", buildRadioCapabilities(k, s, band))
 
             if (detailed) {
                 radioObj.put("txpower", s.opt("txpower") ?: info?.opt("txpower"))
@@ -738,9 +733,36 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                     .put("band", if (ch > 14) 5 else 2.4)
                     .put("encryption", encEnabled)
                     .put("encryptionMode", encDesc)
-                    .put("encryptionLabel", if (encEnabled) encDesc else "Open"))
+                    .put("encryptionLabel", if (encEnabled) encDesc else "Open")
+                    .put("needsPassword", encEnabled))
             }
         }
+        // Build joinable: deduplicate by SSID, keep the strongest signal per SSID
+        val bestByName = mutableMapOf<String, JSONObject>()
+        for (i in 0 until networks.length()) {
+            val n = networks.optJSONObject(i) ?: continue
+            val ssid = n.optString("ssid", "")
+            if (ssid.isEmpty()) continue
+            val existing = bestByName[ssid]
+            if (existing == null || n.optInt("signal", -999) > existing.optInt("signal", -999)) {
+                bestByName[ssid] = n
+            }
+        }
+        val joinable = JSONArray()
+        bestByName.values.sortedByDescending { it.optInt("signal", -999) }.forEach { joinable.put(it) }
+
+        // Build congestion: count APs per channel
+        val channelCounts = mutableMapOf<Int, Int>()
+        for (i in 0 until networks.length()) {
+            val ch = networks.optJSONObject(i)?.optInt("channel", 0) ?: 0
+            if (ch > 0) channelCounts[ch] = (channelCounts[ch] ?: 0) + 1
+        }
+        val congestion = JSONArray()
+        channelCounts.entries.sortedBy { it.key }.forEach { (ch, count) ->
+            val level = when { count >= 5 -> "crowded"; count >= 3 -> "moderate"; else -> "clear" }
+            congestion.put(JSONObject().put("channel", ch).put("count", count).put("level", level))
+        }
+
         val wireless = uciOf("wireless"); val radios = JSONArray()
         wireless.keys().forEach { k ->
             val s = wireless.optJSONObject(k) ?: return@forEach
@@ -748,7 +770,7 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 radios.put(JSONObject().put("id", k).put("band", bandFromSection(s)).put("label", bandFromSection(s)))
         }
         return ok(JSONObject().put("radio", radio).put("radios", radios).put("networks", networks)
-            .put("joinable", JSONObject()).put("congestion", JSONObject()))
+            .put("joinable", joinable).put("congestion", congestion))
     }
 
     private fun applyRadioSettings(radioId: String, body: JSONObject): Response {
@@ -1189,7 +1211,14 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         return ok(JSONObject().put("system", system)
             .put("router", JSONObject().put("host", activeRouterIp).put("username", "root")
                 .put("luciUrl", "http://$activeRouterIp/cgi-bin/luci"))
-            .put("capabilities", capabilities().optJSONObject("features") ?: JSONObject()))
+            .put("capabilities", JSONObject()
+                .put("wirelessControl", true)
+                .put("iwinfo", true)
+                .put("dhcpLeases", true)
+                .put("fileRead", false)
+                .put("cpuUsage", false)
+                .put("sqm", false)
+                .put("hostapdControl", false)))
     }
 
     private fun rebootRouter(): Response {
@@ -1259,6 +1288,61 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     // ═══════════════════════════════════════════════════════════
     // Utilities
     // ═══════════════════════════════════════════════════════════
+    
+    private fun buildRadioCapabilities(radioId: String, uciSection: JSONObject, band: String): JSONObject {
+        // Try to find an actual interface name for this radio to query iwinfo
+        val wirelessStatus = tryCall("network.wireless", "status") ?: JSONObject()
+        val radioStatus = wirelessStatus.optJSONObject(radioId)
+        var ifname: String? = null
+        radioStatus?.optJSONArray("interfaces")?.let { ifaces ->
+            for (i in 0 until ifaces.length()) {
+                val n = ifaces.optJSONObject(i)?.optString("ifname", "")
+                if (!n.isNullOrEmpty()) { ifname = n; break }
+            }
+        }
+
+        // Get available channels from iwinfo freqlist
+        val channels = JSONArray()
+        if (ifname != null) {
+            val freqList = tryCall("iwinfo", "freqlist", JSONObject().put("device", ifname))
+            freqList?.optJSONArray("results")?.let { results ->
+                for (i in 0 until results.length()) {
+                    val entry = results.optJSONObject(i) ?: continue
+                    val ch = entry.optInt("channel", 0)
+                    if (ch > 0 && !entry.optBoolean("restricted", false)) {
+                        channels.put(JSONObject().put("channel", ch)
+                            .put("frequency", entry.optInt("mhz", 0))
+                            .put("dfs", entry.optBoolean("dfs", false)))
+                    }
+                }
+            }
+        }
+
+        // Build width options based on band
+        val widthOptions = JSONArray()
+        if (band.contains("5") || band.contains("6")) {
+            widthOptions.put(JSONObject().put("width", 20).put("value", "VHT20").put("label", "20 MHz").put("standard", "802.11ac"))
+            widthOptions.put(JSONObject().put("width", 40).put("value", "VHT40").put("label", "40 MHz").put("standard", "802.11ac"))
+            widthOptions.put(JSONObject().put("width", 80).put("value", "VHT80").put("label", "80 MHz").put("standard", "802.11ac"))
+            widthOptions.put(JSONObject().put("width", 160).put("value", "VHT160").put("label", "160 MHz").put("standard", "802.11ac"))
+            // Add HE (Wi-Fi 6) options if available
+            val htmode = uciSection.optString("htmode", "")
+            if (htmode.startsWith("HE") || htmode.contains("AX") || uciSection.optString("band", "").contains("a")) {
+                widthOptions.put(JSONObject().put("width", 80).put("value", "HE80").put("label", "80 MHz (Wi-Fi 6)").put("standard", "802.11ax"))
+                widthOptions.put(JSONObject().put("width", 160).put("value", "HE160").put("label", "160 MHz (Wi-Fi 6)").put("standard", "802.11ax"))
+            }
+        } else {
+            widthOptions.put(JSONObject().put("width", 20).put("value", "HT20").put("label", "20 MHz").put("standard", "802.11n"))
+            widthOptions.put(JSONObject().put("width", 40).put("value", "HT40").put("label", "40 MHz").put("standard", "802.11n"))
+        }
+
+        val hasChannels = channels.length() > 0
+        return JSONObject()
+            .put("supports", JSONObject().put("channel", hasChannels).put("txpower", true))
+            .put("channels", channels)
+            .put("widthOptions", widthOptions)
+            .put("txpower", JSONObject().put("min", 0).put("max", 30))
+    }
     private fun bandFromSection(s: JSONObject): String {
         val band = s.optString("band", "")
         return when { band.contains("5") -> "5GHz"; band.contains("6") -> "6GHz"; else -> "2.4GHz" }
