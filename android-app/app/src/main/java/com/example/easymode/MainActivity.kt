@@ -15,6 +15,7 @@ import android.os.IBinder
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebSettings
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
@@ -150,6 +151,22 @@ fun WebViewContainer(serverReady: Boolean, onWebViewReady: (WebView) -> Unit) {
                 builtInZoomControls = false
                 displayZoomControls = false
                 databaseEnabled = true
+                // Assets are served from a localhost server bundled in the APK, so the
+                // HTTP cache buys nothing and only risks serving stale UI after an update.
+                cacheMode = WebSettings.LOAD_NO_CACHE
+            }
+
+            // On a fresh install or an app update, wipe any WebView cache left from the
+            // previous version so the user always gets the UI shipped in this build.
+            val prefs = context.getSharedPreferences("easymode", Context.MODE_PRIVATE)
+            @Suppress("DEPRECATION")
+            val currentVersion = try {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionCode
+            } catch (_: Exception) { 0 }
+            if (prefs.getInt("cache_version", -1) != currentVersion) {
+                webView.clearCache(true)
+                WebStorage.getInstance().deleteAllData()
+                prefs.edit().putInt("cache_version", currentVersion).apply()
             }
 
             CookieManager.getInstance().setAcceptCookie(true)

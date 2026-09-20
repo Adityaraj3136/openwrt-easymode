@@ -35,6 +35,17 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     private data class BwSample(val ts: Long, val rx: Long, val tx: Long, val iface: String)
     private var lastBwSample: BwSample? = null
 
+    // Short-lived cache for the client list. collectClients() makes many sequential ubus
+    // round-trips (host hints, leases, per-interface assoclist); the dashboard polls it
+    // alongside DHCP, so a 3s TTL collapses duplicate work without showing stale data.
+    private var clientsCache: Pair<JSONArray, Boolean>? = null
+    private var clientsCacheAt: Long = 0L
+    private val clientsCacheTtlMs = 3000L
+
+    // Runtime ifname resolution hits iwinfo repeatedly; names are stable for a session,
+    // so memoise them keyed by "radioId|mode|apIndex".
+    private val ifnameCache = HashMap<String, String>()
+
     // ── Called by MainActivity when Wi-Fi network changes ────
     fun onNetworkChanged() {
         val newGateway = getGatewayIp()
@@ -42,7 +53,16 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             // New network detected — clear session so user re-authenticates
             activeSid = ""
             activeRouterIp = newGateway
+            invalidateCaches()
         }
+    }
+
+    // Drop cached client list and interface names — call after anything that changes
+    // the network topology (mode switch, new uplink) so the next read is fresh.
+    private fun invalidateCaches() {
+        clientsCache = null
+        clientsCacheAt = 0L
+        ifnameCache.clear()
     }
 
     // ── Gateway IP detection ──────────────────────────────────
@@ -144,8 +164,13 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         if (uri.startsWith("/api/")) return handleApi(session)
         val path = if (uri == "/") "index.html" else uri.trimStart('/')
         return try {
-            newChunkedResponse(Response.Status.OK, getMimeTypeForFile(path),
+            val resp = newChunkedResponse(Response.Status.OK, getMimeTypeForFile(path),
                 context.assets.open("frontend/$path"))
+            // Assets ship inside the APK and change only on update. Tell the WebView never
+            // to cache them so an updated build is always reflected immediately.
+            resp.addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
+            resp.addHeader("Pragma", "no-cache")
+            resp
         } catch (_: IOException) {
             newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not Found: $path")
         }
@@ -251,6 +276,8 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             return unblockClient(uri.removePrefix("/api/dhcp/blocked/"))
 
         // ── Mode switching ───────────────────────────────────────
+        // A mode switch changes interfaces/topology, so drop cached ifnames + client list.
+        if (uri.startsWith("/api/mode/") && method == Method.POST) invalidateCaches()
         if (uri == "/api/mode") return ok(buildModeOverview())
         if (uri == "/api/mode/router" && method == Method.POST) return switchToRouter(body)
         if (uri == "/api/mode/ap" && method == Method.POST) return switchToAP(body)
@@ -1466,6 +1493,17 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
      * signal. Returns a JSONArray of device objects and whether any source was reachable.
      */
     private fun collectClients(): Pair<JSONArray, Boolean> {
+        val cached = clientsCache
+        if (cached != null && (System.currentTimeMillis() - clientsCacheAt) < clientsCacheTtlMs) {
+            return cached
+        }
+        val fresh = collectClientsUncached()
+        clientsCache = fresh
+        clientsCacheAt = System.currentTimeMillis()
+        return fresh
+    }
+
+    private fun collectClientsUncached(): Pair<JSONArray, Boolean> {
         val stations = collectWifiStations()
         // mac -> device object, so the same device from multiple sources merges.
         val byMac = linkedMapOf<String, JSONObject>()
@@ -1548,11 +1586,31 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             dev.put("connectedSeconds", st.opt("connectedSeconds"))
         }
 
+        // Filter out devices that aren't ours. In repeater mode host hints and ARP carry
+        // the upstream (main router) network too; keep only devices associated to our own
+        // Wi-Fi AP, or whose IP sits inside our LAN subnet. Our own LAN gateway IP is dropped.
+        val subnet = lanSubnet()
+        val ownIp = (uciOf("network").optJSONObject("lan")?.optString("ipaddr", "")?.ifEmpty { null })
+            ?: activeRouterIp
+
         // Normalise: fill the display IP, mark wired vs wireless.
         val out = JSONArray()
         byMac.values.forEach { dev ->
-            if (dev.isNull("ip")) dev.put("ip", "—")
-            dev.put("isWireless", stations.containsKey(dev.optString("mac")))
+            val mac = dev.optString("mac")
+            val isWireless = stations.containsKey(mac)
+            val ip = if (dev.isNull("ip")) "" else dev.optString("ip", "")
+            // Keep rule: our associated Wi-Fi station always; otherwise must be a real IP
+            // inside our LAN subnet and not the router's own address.
+            val keep = when {
+                isWireless -> true
+                subnet == null -> ip.isNotEmpty() // can't determine subnet: fall back to "has IP"
+                ip.isEmpty() -> false
+                ip == ownIp -> false
+                else -> ipInSubnet(ip, subnet)
+            }
+            if (!keep) return@forEach
+            dev.put("ip", if (ip.isEmpty()) "—" else ip)
+            dev.put("isWireless", isWireless)
             out.put(dev)
         }
         return Pair(out, available)
@@ -1564,15 +1622,52 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
      * radio id itself, returning the first that iwinfo recognises.
      */
     private fun resolveIfname(radioId: String, mode: String, apIndex: Int): String {
+        val cacheKey = "$radioId|$mode|$apIndex"
+        ifnameCache[cacheKey]?.let { return it }
         val idx = radioId.filter { it.isDigit() }.ifEmpty { "0" }
         val m = if (mode == "sta") "sta" else "ap"
         val n = if (mode == "sta") 0 else apIndex
         val candidates = listOf("phy$idx-$m$n", "phy$idx-${m}0", "wlan$idx", radioId)
         for (c in candidates) {
             val info = tryCall("iwinfo", "info", JSONObject().put("device", c))
-            if (info != null && info.length() > 0) return c
+            if (info != null && info.length() > 0) {
+                ifnameCache[cacheKey] = c
+                return c
+            }
         }
         return candidates.first()
+    }
+
+    /**
+     * Our LAN subnet as (networkInt, maskInt), read from UCI lan config. Used to drop
+     * upstream/main-router devices from the client list when running as a repeater — in
+     * that mode host hints and the ARP table also carry the upstream network's clients.
+     * Returns null when the LAN address can't be determined (then no filtering is applied).
+     */
+    private fun lanSubnet(): Pair<Long, Long>? {
+        val lan = uciOf("network").optJSONObject("lan")
+        val ip = (lan?.optString("ipaddr", "")?.ifEmpty { null }) ?: activeRouterIp.ifEmpty { null } ?: return null
+        val mask = lan?.optString("netmask", "")?.ifEmpty { null } ?: "255.255.255.0"
+        val ipInt = ipToLong(ip) ?: return null
+        val maskInt = ipToLong(mask) ?: return null
+        return Pair(ipInt and maskInt, maskInt)
+    }
+
+    private fun ipToLong(ip: String): Long? {
+        val parts = ip.trim().split(".")
+        if (parts.size != 4) return null
+        var out = 0L
+        for (p in parts) {
+            val n = p.toIntOrNull() ?: return null
+            if (n < 0 || n > 255) return null
+            out = (out shl 8) or n.toLong()
+        }
+        return out
+    }
+
+    private fun ipInSubnet(ip: String, subnet: Pair<Long, Long>): Boolean {
+        val ipInt = ipToLong(ip) ?: return false
+        return (ipInt and subnet.second) == subnet.first
     }
 
     private fun formatUptime(seconds: Long): String {

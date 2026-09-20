@@ -232,27 +232,39 @@
 
 /* ── Modals: full-screen sheet on mobile ──────────────────── */
 @media (max-width: 860px) {
-  /* The overlay must NOT scroll: it pins the sheet to the bottom and the sheet
-     scrolls its own body. An overlay that scrolls while aligning flex-end clips
-     the sheet's top out of reach. */
+  /* The overlay is just a dimmed backdrop. The modal itself is positioned with
+     fixed top/bottom so its height is deterministic and never depends on flex
+     distribution (which was collapsing the body to a sliver). */
   .modal-overlay {
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
+    display: block;
     padding: 0;
     overflow: hidden;
   }
   .modal {
-    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    position: fixed;
+    left: 0;
+    right: 0;
+    /* Box physically stops just above the fixed bottom nav (54px + safe area),
+       so head/body/foot are all on screen and the nav stays visible below. */
+    bottom: calc(54px + env(safe-area-inset-bottom, 0px));
+    /* Start near the top of the screen; everything between is the sheet. */
+    top: max(40px, env(safe-area-inset-top, 0px));
+    width: 100%;
     max-width: 100% !important;
-    /* Leave room for the fixed bottom nav (54px) + safe area so nothing hides
-       behind it, and cap so head/body/foot stay on screen. */
-    max-height: calc(100dvh - 54px - env(safe-area-inset-bottom, 0px));
-    margin-bottom: calc(54px + env(safe-area-inset-bottom, 0px));
+    max-height: none;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    display: flex;
+    flex-direction: column;
   }
-  /* Head and foot stay put; only the body scrolls. */
-  .modal-head, .modal-foot { flex: 0 0 auto; }
-  .modal-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  /* Head and foot keep their natural height; only the body scrolls. */
+  .modal-head { flex: 0 0 auto; }
+  .modal-foot { flex: 0 0 auto; }
+  .modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
   .modal-foot { flex-direction: column; gap: 8px; padding-bottom: 20px; }
   .modal-foot .btn { width: 100%; }
   /* Primary action on top on mobile */
