@@ -1664,12 +1664,6 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             val wireless = uciOf("wireless")
             val networkCfg = uciOf("network")
 
-            // Snapshot the ORIGINAL wireless/network BEFORE staging anything. `uci get`
-            // reflects staged-but-uncommitted changes, so a snapshot taken after staging
-            // would capture the new state and restore nothing. Taken here it holds the
-            // pre-change config to roll back to if the uplink never associates (Phase A).
-            val preSnapshot = snapshotConfigs("wireless", "network")
-
             // Remove any existing STA interfaces to avoid duplicates
             wireless.keys().forEach { k ->
                 val s = wireless.optJSONObject(k) ?: return@forEach
@@ -1696,47 +1690,16 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             // STA's channel. (PC: wireless-uplink.js connectUplink.)
             uciSet("wireless", radioId, JSONObject().put("disabled", "0").put("channel", "auto"))
 
-            // IPv6 pass-through is opt-in from the setup wizard (default off = plain IPv4).
-            val wantIpv6 = body.optBoolean("ipv6", false)
-
-            // ── PHASE A: connect the uplink FIRST and prove it associated ──────────────
-            // Previously we staged STA + LAN + DHCP + firewall together and reported success
-            // as soon as the ROUTER answered again — never checking the STA actually joined.
-            // A wrong password / out-of-range / mismatch then looked like success while the
-            // uplink was dead. Mirror the PC (connectUplink): bring up only the STA + wwan,
-            // apply, and wait for real association before touching anything else, so a bad
-            // password is caught while the LAN is still in its old working state.
+            // Create wwan network interface only if it doesn't already exist
             val wwanExists = networkCfg.keys().asSequence().any { k ->
                 networkCfg.optJSONObject(k)?.optString(".name") == "wwan" || networkCfg.has("wwan")
             }
+            // IPv6 pass-through is opt-in from the setup wizard (default off = plain IPv4).
+            val wantIpv6 = body.optBoolean("ipv6", false)
+
             if (!wwanExists) uciAdd("network", "wwan", "interface")
             uciSet("network", "wwan", JSONObject().put("proto", "dhcp").put("ipv6", if (wantIpv6) "1" else "0"))
 
-            // Commit + apply just the uplink (preSnapshot above holds the pre-change state).
-            uciCommit("wireless", "network"); uciApply()
-            // Kick the radio so the STA starts associating on the upstream channel.
-            tryCall("file", "exec", JSONObject().put("command", "/sbin/wifi").put("params", JSONArray().put("reload")))
-
-            // Wait up to ~70s for the uplink to associate AND pull a DHCP lease. Generous
-            // because a cold radio restart + scan/auth/assoc + DHCP can take 30-50s on MT7986.
-            // No rollback timer is armed here (LAN is untouched, so the app stays connected at
-            // the same IP the whole time).
-            val assoc = waitForAssociation(radioId, System.currentTimeMillis() + 70_000)
-            if (assoc == null) {
-                // Uplink never joined — restore the previous wireless/network and report the
-                // honest, specific failure instead of a false success.
-                restoreSnapshot(preSnapshot)
-                uciCommit("wireless", "network"); uciApply()
-                tryCall("file", "exec", JSONObject().put("command", "/sbin/wifi").put("params", JSONArray().put("reload")))
-                return err(Response.Status.CONFLICT,
-                    if (upstreamEnc == "none")
-                        "Couldn't join \"$upstreamSsid\". The network may be out of range."
-                    else
-                        "Couldn't join \"$upstreamSsid\". The Wi-Fi password may be wrong, or the network is out of range.",
-                    "UPLINK_NOT_ASSOCIATED")
-            }
-
-            // ── PHASE B: uplink is up — configure LAN / DHCP / firewall for sharing ────
             // Coming from AP mode the LAN is a DHCP client; repeater needs a static LAN so
             // it stays reachable and can route. LAN kernel IPv6 follows the user's choice —
             // off stops RA leaks from the shared radio (matches the PC repeater plan).
@@ -1777,22 +1740,22 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
                 removeFromWanZone("wwan6")
             }
 
-            // The repeater keeps its own LAN address, so the app reconnects at the same IP.
-            // Apply behind the rollback timer, and verify the uplink is STILL associated
-            // before confirming — if the LAN/firewall change somehow drops it, roll back
-            // instead of confirming a broken state.
-            val applied = commitWithRollback(
-                listOf("wireless", "network", "dhcp", "firewall"),
-                settleMs = 6000,
-                verify = { staAssociated(radioId) != null },
-            )
-            if (!applied) {
-                // Phase B was reverted; Phase A's STA config went back with it, so the uplink
-                // is gone too. Report honestly rather than claiming success.
-                return err(Response.Status.INTERNAL_ERROR,
-                    "Connected to \"$upstreamSsid\", but the router couldn't finish setting up internet sharing, so it restored your previous setup.",
-                    "CHANGE_REVERTED")
-            }
+            // The repeater keeps its own LAN address, so the app reconnects at the same IP
+            // even while the STA is still associating upstream. Apply behind the rollback
+            // timer and return promptly — do NOT block polling for association here. On this
+            // hardware the app watches the router over the same Wi-Fi, and a long synchronous
+            // wait made the request appear to hang; the dashboard's "Main Wi-Fi" status shows
+            // the real uplink state once it comes up. If the router never answers again, the
+            // rollback timer restores the previous mode on its own.
+            val applied = commitWithRollback(listOf("wireless", "network", "dhcp", "firewall"), settleMs = 6000)
+            if (!applied) return err(Response.Status.INTERNAL_ERROR,
+                "The router didn't come back after switching to Repeater mode, so it restored your previous setup.",
+                "CHANGE_REVERTED")
+
+            // Reload wifi so the radio restarts on the upstream channel and the STA actually
+            // begins associating. uci apply usually does this, but an explicit reload makes
+            // the uplink come up reliably across firmware variants (matches the PC flow).
+            tryCall("file", "exec", JSONObject().put("command", "/sbin/wifi").put("params", JSONArray().put("reload")))
 
             // When IPv6 was enabled, restart odhcpd so RA/DHCPv6 reaches clients without a
             // reconnect and reload network so the wwan6 uplink comes up (matches updateIpv6).
@@ -1801,10 +1764,8 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
                 tryCall("file", "exec", JSONObject().put("command", "/etc/init.d/odhcpd").put("params", JSONArray().put("restart")))
             }
 
-            val sig = assoc.opt("signal")
-            ok(JSONObject().put("mode", "repeater").put("ok", true).put("pending", false)
-                .put("message", "Connected to \"$upstreamSsid\"" +
-                    (if (sig != null && sig != JSONObject.NULL) " at $sig dBm." else ".")))
+            ok(JSONObject().put("mode", "repeater").put("ok", true).put("pending", true)
+                .put("message", "Connecting to \"$upstreamSsid\"… Give the router a moment, then check Main Wi-Fi on the dashboard."))
         } catch (e: Exception) {
             err(Response.Status.INTERNAL_ERROR, "Mode switch failed: ${e.message}")
         }
@@ -1995,71 +1956,6 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
         return wireless.keys().asSequence().firstOrNull { k -> wireless.optJSONObject(k)?.optString(".type") == "wifi-device" }
     }
 
-    /**
-     * Live association state of the repeater uplink on [radioId] — i.e. whether the STA
-     * actually joined the upstream AP AND pulled an address.
-     *
-     * The authoritative signal on this hardware is the `wwan` network interface being up
-     * with an IPv4 lease: that's what the dashboard uses (buildNetworkPayload) and it works
-     * on MediaTek vendor firmware, which lacks network.wireless.status and names the client
-     * interface apcliN (not the phyN-sta0 the OpenWrt iwinfo convention expects). We check
-     * that first, then fall back to iwinfo on a resolved STA ifname for stock OpenWrt.
-     *
-     * @return {ifname, ssid, signal} when associated, or null when not associated / no STA.
-     */
-    private fun staAssociated(radioId: String): JSONObject? {
-        // Primary: is the wwan uplink interface up with an IPv4 address? Proves the STA
-        // associated and got a lease — independent of the driver's interface naming.
-        val dump = tryCall("network.interface", "dump")
-        dump?.optJSONArray("interface")?.let { ifaces ->
-            for (i in 0 until ifaces.length()) {
-                val iface = ifaces.optJSONObject(i) ?: continue
-                val name = iface.optString("interface")
-                if (!name.matches(Regex("wwan.*|wan_sta.*|repeater.*", RegexOption.IGNORE_CASE))) continue
-                if (!iface.optBoolean("up")) continue
-                val v4 = iface.optJSONArray("ipv4-address")
-                if (v4 != null && v4.length() > 0) {
-                    return JSONObject().put("ifname", iface.optString("l3_device", iface.optString("device", name)))
-                        .put("ssid", JSONObject.NULL).put("signal", JSONObject.NULL)
-                }
-            }
-        }
-
-        // Fallback (stock OpenWrt): resolve the STA ifname and ask iwinfo for an upstream SSID.
-        var ifname = ""
-        tryCall("network.wireless", "status")?.optJSONObject(radioId)?.optJSONArray("interfaces")?.let { ifaces ->
-            for (i in 0 until ifaces.length()) {
-                val iface = ifaces.optJSONObject(i) ?: continue
-                val mode = iface.optJSONObject("config")?.optString("mode", "") ?: iface.optString("mode", "")
-                if (mode.equals("sta", true) || mode.equals("client", true)) {
-                    val n = iface.optString("ifname", "")
-                    if (n.isNotEmpty()) { ifname = n; break }
-                }
-            }
-        }
-        if (ifname.isEmpty()) ifname = resolveIfname(radioId, "sta", 0)
-        if (ifname.isEmpty()) return null
-
-        val info = tryCall("iwinfo", "info", JSONObject().put("device", ifname)) ?: return null
-        val ssid = info.optString("ssid", "")
-        if (ssid.isEmpty() || ssid == "null") return null
-        return JSONObject().put("ifname", ifname).put("ssid", ssid)
-            .put("signal", info.opt("signal") ?: JSONObject.NULL)
-    }
-
-    /**
-     * Poll until the STA on [radioId] associates upstream, or [deadline] (wall-clock ms)
-     * passes. Sleeps upfront because `wifi reload` briefly tears the radio down, so an
-     * immediate probe would always see "not associated". Mirrors PC waitForAssociation.
-     */
-    private fun waitForAssociation(radioId: String, deadline: Long, initialDelayMs: Long = 8000, pollMs: Long = 3000): JSONObject? {
-        try { Thread.sleep(minOf(initialDelayMs, maxOf(0L, deadline - System.currentTimeMillis()))) } catch (_: InterruptedException) {}
-        while (true) {
-            staAssociated(radioId)?.let { return it }
-            if (System.currentTimeMillis() + pollMs >= deadline) return null
-            try { Thread.sleep(pollMs) } catch (_: InterruptedException) {}
-        }
-    }
 
     /**
      * MAC addresses currently associated to any AP interface, gathered straight from UCI
