@@ -101,6 +101,18 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
         } catch (_: Exception) {}
     }
 
+    private fun uciDeleteOption(config: String, section: String, option: String) {
+        try { ubus.call(activeRouterIp, activeSid, "uci", "delete",
+            JSONObject().put("config", config).put("section", section).put("option", option))
+        } catch (_: Exception) {}
+    }
+
+    /** Creates a named section of the given type if absent, then applies values. */
+    private fun uciEnsure(config: String, section: String, type: String, values: JSONObject) {
+        if (uciOf(config).optJSONObject(section) == null) uciAdd(config, section, type)
+        if (values.length() > 0) uciSet(config, section, values)
+    }
+
     private fun uciAdd(config: String, name: String, type: String): String {
         return try {
             val r = ubus.call(activeRouterIp, activeSid, "uci", "add",
@@ -351,25 +363,9 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             }
         }
 
-        // Fetch Wi-Fi clients (MAC addresses) using iwinfo assoclist
-        val netWireless = tryCall("network.wireless", "status") ?: JSONObject()
-        val wifiMacs = mutableSetOf<String>()
-        netWireless.keys().forEach { radio ->
-            val ifaces = netWireless.optJSONObject(radio)?.optJSONArray("interfaces") ?: return@forEach
-            for (i in 0 until ifaces.length()) {
-                val ifname = ifaces.optJSONObject(i)?.optString("ifname", "") ?: continue
-                if (ifname.isNotEmpty()) {
-                    val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", ifname))
-                    val results = assoc?.optJSONArray("results")
-                    if (results != null) {
-                        for (r in 0 until results.length()) {
-                            val mac = results.optJSONObject(r)?.optString("mac")?.lowercase()
-                            if (mac != null) wifiMacs.add(mac)
-                        }
-                    }
-                }
-            }
-        }
+        // Fetch Wi-Fi clients (MAC addresses) via iwinfo assoclist. Uses a UCI-based
+        // ifname fallback so it works on firmware without network.wireless.status.
+        val wifiMacs = collectWifiMacs()
 
         val clientDevices = JSONArray()
         var wiredCount = 0
@@ -689,22 +685,38 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
 
     private fun buildWifiClients(): Response {
         val clients = JSONArray()
-        // Use network.wireless ubus which gives real runtime interface names
+        // Resolve AP ifnames from UCI (network.wireless.status is absent on vendor firmware),
+        // then read associated stations from each via iwinfo assoclist.
+        val wireless = uciOf("wireless")
         val netWireless = tryCall("network.wireless", "status") ?: JSONObject()
-        netWireless.keys().forEach { radioId ->
-            val radioObj = netWireless.optJSONObject(radioId) ?: return@forEach
-            val interfaces = radioObj.optJSONArray("interfaces") ?: return@forEach
-            for (i in 0 until interfaces.length()) {
-                val iface = interfaces.optJSONObject(i) ?: continue
-                val ifname = iface.optString("ifname", "")
-                val config = iface.optJSONObject("config") ?: JSONObject()
-                if (config.optString("mode", "ap") != "ap" || ifname.isEmpty()) continue
+        wireless.keys().forEach { k ->
+            val radio = wireless.optJSONObject(k) ?: return@forEach
+            val rType = radio.optString(".type").ifEmpty { if (k.matches(Regex("radio\\d+"))) "wifi-device" else "wifi-iface" }
+            if (rType != "wifi-device") return@forEach
+            val netInterfaces = netWireless.optJSONObject(k)?.optJSONArray("interfaces") ?: JSONArray()
+            var apIndex = 0
+            wireless.keys().forEach { ik ->
+                val iface = wireless.optJSONObject(ik) ?: return@forEach
+                if (iface.optString(".type") != "wifi-iface" || iface.optString("device") != k) return@forEach
+                if (iface.optString("mode", "ap") != "ap") return@forEach
+                val ssid = iface.optString("ssid", "")
+                var ifname = iface.optString("ifname", "")
+                for (i in 0 until netInterfaces.length()) {
+                    val cfg = netInterfaces.optJSONObject(i)?.optJSONObject("config") ?: continue
+                    if (cfg.optString(".name") == ik || cfg.optString("ssid") == ssid) {
+                        val nIf = netInterfaces.optJSONObject(i)?.optString("ifname", "") ?: ""
+                        if (nIf.isNotEmpty()) ifname = nIf
+                    }
+                }
+                if (ifname.isEmpty()) ifname = resolveIfname(k, "ap", apIndex)
+                apIndex++
+                if (ifname.isEmpty()) return@forEach
                 val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", ifname))
                 assoc?.optJSONArray("results")?.let { results ->
                     for (j in 0 until results.length()) {
                         val e = results.getJSONObject(j)
                         clients.put(JSONObject().put("mac", e.optString("mac")).put("signal", e.opt("signal"))
-                            .put("radio", radioId).put("ssid", config.optString("ssid", ""))
+                            .put("radio", k).put("ssid", ssid)
                             .put("connectedSeconds", e.opt("connected_time")))
                     }
                 }
@@ -848,10 +860,11 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 guestIface = s; guestSection = k
             }
         }
+        val guestIp = uciOf("network").optJSONObject("guest")?.optString("ipaddr", "")?.ifEmpty { null } ?: "192.168.22.1"
         if (guestIface == null) {
             return ok(JSONObject().put("enabled", false).put("ssid", "Guest Network")
                 .put("encryption", "none").put("key", JSONObject.NULL)
-                .put("ipaddr", "192.168.22.1").put("isolate", true).put("hidden", false))
+                .put("ipaddr", guestIp).put("isolate", true).put("hidden", false))
         }
         val g = guestIface!!
         return ok(JSONObject()
@@ -859,40 +872,119 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
             .put("ssid", g.optString("ssid", "Guest Network"))
             .put("encryption", g.optString("encryption", "none"))
             .put("key", g.optString("key", null))
-            .put("ipaddr", "192.168.22.1")
+            .put("ipaddr", guestIp)
             .put("isolate", g.optString("isolate", "1") == "1")
             .put("hidden", g.optString("hidden", "0") == "1"))
     }
 
     private fun updateGuestWifi(body: JSONObject): Response {
+        val enabled = if (body.has("enabled")) body.optBoolean("enabled") else true
+        val ssid = if (body.has("ssid")) body.optString("ssid") else "Guest Network"
+        val encryption = if (body.has("encryption")) body.optString("encryption") else "psk2"
+        val key = body.optString("key", "")
+        val isolate = if (body.has("isolate")) body.optBoolean("isolate") else true
+        val hidden = if (body.has("hidden")) body.optBoolean("hidden") else false
+
+        // Pick a guest subnet that doesn't collide with the LAN.
+        var guestIp = body.optString("ipaddr", "").ifEmpty { "192.168.22.1" }
+        val network = uciOf("network")
+        val lanIp = network.optJSONObject("lan")?.optString("ipaddr", "") ?: ""
+        if (lanIp.isNotEmpty() && lanIp.substringBeforeLast('.') == guestIp.substringBeforeLast('.')) {
+            guestIp = "192.168.23.1"
+        }
+
+        // 1. Guest network interface. No type:'bridge' — netifd bridges the AP iface via
+        //    the wifi-iface `network` option; forcing a bridge breaks DHCP on MTK drivers.
+        uciEnsure("network", "guest", "interface", JSONObject()
+            .put("proto", "static")
+            .put("ipaddr", guestIp).put("netmask", "255.255.255.0"))
+
+        // 2. Guest DHCP server.
+        uciEnsure("dhcp", "guest", "dhcp", JSONObject()
+            .put("interface", "guest")
+            .put("start", "100").put("limit", "150").put("leasetime", "12h").put("ignore", "0"))
+
+        // 3. Firewall: guest zone (isolated from LAN), forward to WAN, allow DNS+DHCP.
+        val firewall = uciOf("firewall")
+        fun firewallHas(type: String, match: (JSONObject) -> Boolean): Boolean =
+            firewall.keys().asSequence().any { k ->
+                firewall.optJSONObject(k)?.let { it.optString(".type") == type && match(it) } == true
+            }
+        if (!firewallHas("zone") { it.optString("name") == "guest" }) {
+            uciEnsure("firewall", "guest_zone", "zone", JSONObject()
+                .put("name", "guest")
+                .put("network", JSONArray().put("guest"))
+                .put("input", "REJECT").put("output", "ACCEPT").put("forward", "REJECT"))
+        }
+        if (!firewallHas("forwarding") { it.optString("src") == "guest" && it.optString("dest") == "wan" }) {
+            uciEnsure("firewall", "guest_fwd", "forwarding", JSONObject()
+                .put("src", "guest").put("dest", "wan"))
+        }
+        if (!firewallHas("rule") { it.optString("name") == "Guest_DNS" }) {
+            uciEnsure("firewall", "guest_dns", "rule", JSONObject()
+                .put("name", "Guest_DNS").put("src", "guest")
+                .put("dest_port", "53").put("proto", "tcp udp").put("target", "ACCEPT"))
+        }
+        if (!firewallHas("rule") { it.optString("name") == "Guest_DHCP" }) {
+            uciEnsure("firewall", "guest_dhcp_rule", "rule", JSONObject()
+                .put("name", "Guest_DHCP").put("src", "guest")
+                .put("dest_port", "67").put("proto", "udp").put("target", "ACCEPT"))
+        }
+
+        // 4. Guest AP on each radio that isn't carrying a repeater (STA) uplink.
         val wireless = uciOf("wireless")
-        var guestSection: String? = null
+        val guestRadios = mutableListOf<String>()
         wireless.keys().forEach { k ->
             val s = wireless.optJSONObject(k) ?: return@forEach
-            if (s.optString(".type") != "wifi-iface") return@forEach
-            val nw = s.optString("network", "")
-            val ssid = s.optString("ssid", "")
-            if (nw.contains("guest", ignoreCase = true) || ssid.startsWith("Guest", ignoreCase = true)) {
-                guestSection = k
+            val rType = s.optString(".type").ifEmpty { if (k.matches(Regex("radio\\d+"))) "wifi-device" else "wifi-iface" }
+            if (rType != "wifi-device") return@forEach
+
+            val hasSta = wireless.keys().asSequence().any { ik ->
+                wireless.optJSONObject(ik)?.let {
+                    it.optString(".type") == "wifi-iface" && it.optString("device") == k &&
+                        it.optString("mode") == "sta" && it.optString("disabled", "0") != "1"
+                } == true
             }
+            // Find any existing guest iface on this radio.
+            var existing: String? = null
+            wireless.keys().forEach { ik ->
+                val iface = wireless.optJSONObject(ik) ?: return@forEach
+                if (iface.optString(".type") == "wifi-iface" && iface.optString("device") == k &&
+                    iface.optString("network") == "guest") existing = ik
+            }
+            if (hasSta) {
+                // Can't run AP+STA+AP on the same chip; drop guest here.
+                if (existing != null) uciDelete("wireless", existing!!)
+                return@forEach
+            }
+
+            guestRadios.add(k)
+            val section = existing ?: uciAdd("wireless", "guest_${k}", "wifi-iface")
+            val values = JSONObject()
+                .put("device", k).put("mode", "ap").put("network", "guest")
+                .put("ssid", ssid).put("encryption", encryption)
+                .put("disabled", if (enabled) "0" else "1")
+                .put("isolate", if (isolate) "1" else "0")
+                .put("hidden", if (hidden) "1" else "0")
+            if (encryption != "none" && key.isNotEmpty()) values.put("key", key)
+            uciSet("wireless", section, values)
+            if (encryption == "none") uciDeleteOption("wireless", section, "key")
         }
-        if (guestSection == null) {
-            // Create guest network: add a new wifi-iface on the first radio
-            val radioId = firstRadioId() ?: return err(Response.Status.BAD_REQUEST, "No radio available")
-            guestSection = "guest_iface"
-            uciAdd("wireless", guestSection!!, "wifi-iface")
-            uciSet("wireless", guestSection!!, JSONObject()
-                .put("device", radioId).put("mode", "ap").put("network", "guest"))
+
+        uciCommit("network", "dhcp", "firewall", "wireless")
+        uciApply()
+
+        // Reload only the radios hosting the guest AP so a repeater uplink stays up.
+        if (guestRadios.isNotEmpty()) {
+            guestRadios.forEach { rid ->
+                tryCall("file", "exec", JSONObject().put("command", "/sbin/wifi").put("params", JSONArray().put("reload").put(rid)))
+            }
+        } else {
+            tryCall("file", "exec", JSONObject().put("command", "/sbin/wifi").put("params", JSONArray().put("reload")))
         }
-        val values = JSONObject()
-        if (body.has("enabled")) values.put("disabled", if (body.optBoolean("enabled")) "0" else "1")
-        if (body.has("ssid")) values.put("ssid", body.optString("ssid"))
-        if (body.has("encryption")) values.put("encryption", body.optString("encryption"))
-        if (body.has("key")) values.put("key", body.optString("key"))
-        if (body.has("hidden")) values.put("hidden", if (body.optBoolean("hidden")) "1" else "0")
-        if (body.has("isolate")) values.put("isolate", if (body.optBoolean("isolate")) "1" else "0")
-        if (values.length() > 0) uciSet("wireless", guestSection!!, values)
-        uciCommit("wireless"); uciApply()
+        tryCall("network.wireless", "reload")
+        tryCall("network.interface.guest", "up")
+
         return buildGuestWifi()
     }
 
@@ -1369,6 +1461,48 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
     private fun firstRadioId(): String? {
         val wireless = uciOf("wireless")
         return wireless.keys().asSequence().firstOrNull { k -> wireless.optJSONObject(k)?.optString(".type") == "wifi-device" }
+    }
+
+    /**
+     * MAC addresses currently associated to any AP interface, gathered straight from UCI
+     * so it works even on firmware without network.wireless.status. Mirrors the ifname
+     * resolution used by buildRadiosArray.
+     */
+    private fun collectWifiMacs(): Set<String> {
+        val macs = mutableSetOf<String>()
+        val wireless = uciOf("wireless")
+        val netWireless = tryCall("network.wireless", "status") ?: JSONObject()
+        wireless.keys().forEach { k ->
+            val radio = wireless.optJSONObject(k) ?: return@forEach
+            val rType = radio.optString(".type").ifEmpty { if (k.matches(Regex("radio\\d+"))) "wifi-device" else "wifi-iface" }
+            if (rType != "wifi-device") return@forEach
+            val netInterfaces = netWireless.optJSONObject(k)?.optJSONArray("interfaces") ?: JSONArray()
+            var apIndex = 0
+            wireless.keys().forEach { ik ->
+                val iface = wireless.optJSONObject(ik) ?: return@forEach
+                if (iface.optString(".type") != "wifi-iface" || iface.optString("device") != k) return@forEach
+                val mode = iface.optString("mode", "ap")
+                if (mode != "ap") return@forEach
+                var ifname = iface.optString("ifname", "")
+                for (i in 0 until netInterfaces.length()) {
+                    val cfg = netInterfaces.optJSONObject(i)?.optJSONObject("config") ?: continue
+                    if (cfg.optString(".name") == ik || cfg.optString("ssid") == iface.optString("ssid")) {
+                        val nIf = netInterfaces.optJSONObject(i)?.optString("ifname", "") ?: ""
+                        if (nIf.isNotEmpty()) ifname = nIf
+                    }
+                }
+                if (ifname.isEmpty()) ifname = resolveIfname(k, mode, apIndex)
+                apIndex++
+                if (ifname.isEmpty()) return@forEach
+                val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", ifname))
+                assoc?.optJSONArray("results")?.let { results ->
+                    for (r in 0 until results.length()) {
+                        results.optJSONObject(r)?.optString("mac")?.lowercase()?.let { if (it.isNotEmpty()) macs.add(it) }
+                    }
+                }
+            }
+        }
+        return macs
     }
 
     /**
