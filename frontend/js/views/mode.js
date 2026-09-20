@@ -621,6 +621,32 @@ function successLines(modeId, summary) {
   ].filter(Boolean);
 }
 
+/**
+ * Result view for backends that apply the switch synchronously (Android), where the
+ * response is the outcome itself rather than a job to poll. A reverted change arrives as a
+ * thrown error and is handled by the caller, so reaching here means the switch was applied.
+ */
+function appliedView(container, modeId, result) {
+  const meta = modeById(modeId);
+  // Android returns { mode, ok, pending, message? } with no per-field summary, so don't
+  // reuse successLines here (it would render "reachable at undefined"). Show the backend's
+  // own message plus a mode-appropriate reconnect note.
+  const note = modeId === 'ap'
+    ? 'This router now takes its address from your main router. If EasyMode cannot reach it, reconnect to the router and open the app again.'
+    : 'Give the router a moment to finish switching, then reconnect if your device dropped off.';
+  clear(container).append(
+    panel({ icon: icon('router', { size: 19 }), title: `Setting up ${meta.title}`, className: 'progress-card wizard' }, [
+      el('div', { class: 'result ok' }, [
+        el('strong', { text: 'Settings applied.' }),
+        result?.message ? el('span', { text: result.message }) : null,
+        el('span', { text: note }),
+      ].filter(Boolean)),
+      el('button', { class: 'btn btn-primary', style: 'margin-top:16px', onclick: () => location.reload(), text: 'Done' }),
+    ]),
+  );
+  toast('Mode applied', { tone: 'ok' });
+}
+
 function progressView(container, jobId, modeId, { onDone }) {
   const body = el('div');
   clear(container).append(
@@ -808,8 +834,15 @@ export function renderModeSetup(container, { onUnauthorized }) {
 
         next.disabled = true;
         try {
-          const job = await APPLY[modeId](buildPayload(modeId, state));
-          cancelPolling = progressView(body, job.jobId, modeId, { onDone: showOverview });
+          const result = await APPLY[modeId](buildPayload(modeId, state));
+          if (result?.jobId) {
+            // Node backend: a background job to poll for step-by-step progress.
+            cancelPolling = progressView(body, result.jobId, modeId, { onDone: showOverview });
+          } else {
+            // Android backend: the switch already ran synchronously (a thrown error would
+            // mean it reverted). There is no job to poll — show the result directly.
+            appliedView(body, modeId, result);
+          }
         } catch (error) {
           if (error.status === 401) return onUnauthorized();
           clear(errorSlot).append(errorState(error));
