@@ -50,7 +50,7 @@ Both versions share the same frontend (HTML/CSS/JS in frontend/)
 and talk to the same OpenWrt ubus JSON-RPC endpoint.
 ```
 
-The two codebases are **completely independent**. The PC version uses Node.js. The Android app uses Kotlin + NanoHTTPD and bundles the frontend as Android assets. Changes to `frontend/` are manually synced to the Android assets folder before each build.
+The two codebases are **completely independent**. The PC version uses Node.js. The Android app uses Kotlin + NanoHTTPD and bundles the frontend as Android assets. Repo-root `frontend/` is the single source of truth; a Gradle `syncFrontend` task (wired to `preBuild`) mirrors it into `android-app/app/src/main/assets/frontend/` automatically on every build, so edits to `frontend/` always reach the APK.
 
 ---
 
@@ -70,7 +70,7 @@ The two codebases are **completely independent**. The PC version uses Node.js. T
 | System overview & reboot | ✅ | ✅ |
 | Bandwidth monitoring (live bytes/sec) | ✅ | ✅ |
 | Dark mode | ✅ | ✅ |
-| IPv4 only (IPv6 removed) | ✅ | ✅ |
+| IPv6 management (on/off, ISP or router-local) | ❌ (IPv4 only) | ✅ |
 | Router password change | ✅ | ❌ Not yet |
 | Auto-reboot scheduling | ✅ | ❌ Not yet |
 | System backup / restore | ✅ | ❌ (blocked by Android sandbox) |
@@ -142,7 +142,7 @@ Or use **Task Scheduler** → Create Basic Task → trigger "At startup" → act
 ### How it works
 
 The Android app embeds:
-- A **NanoHTTPD HTTP server** (runs on `localhost:8080` as a Foreground Service)
+- A **NanoHTTPD HTTP server** bound to `127.0.0.1:8080`, running as a Foreground Service. Loopback-only means no other device on the LAN can reach the app's API.
 - A full-screen **WebView** pointing to `http://localhost:8080/`
 - The entire **frontend** (HTML/CSS/JS) bundled as Android assets
 - A **Kotlin ubus client** (OkHttp) that talks directly to the router
@@ -169,13 +169,12 @@ The APK is a **release build** (not debug) and is self-signed by the CI.
 Requires Android Studio with SDK 36 and JDK 17:
 
 ```bash
-# Sync frontend assets first (REQUIRED before every build)
-Copy-Item -Path "frontend\*" -Destination "android-app\app\src\main\assets\frontend\" -Recurse -Force
-
 cd android-app
 ./gradlew assembleRelease
 # Output: app/build/outputs/apk/release/app-release.apk
 ```
+
+The `syncFrontend` Gradle task copies repo-root `frontend/` into the app's assets automatically before the build — no manual copy step is needed.
 
 ### APK Signing
 
@@ -311,6 +310,7 @@ Install with `npm install`. See `package.json` for exact versions.
 | **Wi-Fi channel optimization approximate** | `iwinfo scan` gives nearby channels but not interference scores | Manual channel selection via Wi-Fi settings |
 | **Guest network limited** | Returns stub — full guest network requires bridge config | Use LuCI |
 | **System backup returns error** | Android assets are read-only, can't stream backup file | Use LuCI |
+| **IPv6 depends on the ISP** | If the provider offers IPv6, devices get global addresses via `wan6`; otherwise they get router-local (ULA) addresses only | Toggle off for pure IPv4 — the app fully reverts routing and restarts odhcpd |
 
 ### PC Version
 
@@ -318,7 +318,7 @@ Install with `npm install`. See `package.json` for exact versions.
 |---|---|
 | **Must run on same machine as browser** | Bound to `127.0.0.1` by default — intentional security boundary |
 | **No auto-start** | Must be manually started or set up via Task Scheduler / PM2 |
-| **IPv6 disabled** | Hardcoded off — router-specific implementation was causing issues |
+| **IPv6 management not implemented** | The Node backend is hardcoded to IPv4 only. The Android app has a full IPv6 section (enable/disable with a clean revert to IPv4); it has not been ported back to the PC version |
 
 ### Both Versions
 
@@ -339,6 +339,7 @@ Install with `npm install`. See `package.json` for exact versions.
 | Very large DHCP lease tables (200+ entries) | May be slow | NanoHTTPD serves JSON synchronously |
 | iOS / Safari not supported | Out of scope | Android WebView only |
 | Router model not shown in dashboard header if `system/board` ubus call fails | Shows IP instead | Fallback is safe |
+| Wi-Fi scan on the repeater uplink band | By design | In repeater mode the band connected to the main router is busy on its associated channel and cannot scan. The app now reports this clearly and suggests using the other band, instead of showing an empty list |
 
 ---
 
@@ -347,6 +348,8 @@ Install with `npm install`. See `package.json` for exact versions.
 - **Password never stored.** The router password is sent once to `ubus session/login` and is never written to disk or memory after that.
 - **Session token is HttpOnly.** The ubus session ID is stored in an `HttpOnly` cookie — inaccessible to JavaScript.
 - **Local network only.** The Android app talks to `192.168.x.x` (private range) only. The PC version restricts router addresses to private ranges by default.
+- **Android server binds loopback only.** The embedded NanoHTTPD server binds `127.0.0.1`, so its API is reachable only from the app's own WebView — not from other devices on the LAN. Combined with a strict session-cookie check on every data endpoint, this keeps router control off the network.
+- **No device backup of the session.** `android:allowBackup="false"` prevents the stored session token from being extracted via `adb backup`.
 - **No outbound internet from the app.** Both versions make zero external network requests during normal operation (fonts are system-native, no CDN calls).
 - **APK signing credentials in CI YAML.** The keystore password (`EasyMode2025!`) is visible in the public `.github/workflows/android.yml`. This is intentional for a personal project — for a distribution build, move these to GitHub Secrets.
 - **Cleartext HTTP to router.** `android:usesCleartextTraffic="true"` is set because router management interfaces (`http://192.168.x.x/ubus`) do not use TLS. This applies only to local private network traffic.
@@ -396,7 +399,7 @@ openwrt-easymode/
 ├── android-app/                 # Android app — completely separate codebase
 │   └── app/src/main/
 │       ├── AndroidManifest.xml  # Permissions: INTERNET, WIFI, FOREGROUND_SERVICE
-│       ├── assets/frontend/     # Synced copy of frontend/ (sync before every build)
+│       ├── assets/frontend/     # Auto-synced from repo-root frontend/ by Gradle (syncFrontend)
 │       └── java/com/example/easymode/
 │           ├── MainActivity.kt  # Activity: starts service, WebView, back button
 │           ├── EasyModeService.kt # Foreground service: keeps NanoHTTPD alive
@@ -417,13 +420,10 @@ openwrt-easymode/
 
 ### Syncing frontend to Android
 
-**Every time you edit `frontend/`**, run this before committing:
-
-```powershell
-Copy-Item -Path "frontend\*" -Destination "android-app\app\src\main\assets\frontend\" -Recurse -Force
-```
-
-The GitHub Actions CI does **not** do this automatically — the synced files must be committed to the repo.
+Repo-root `frontend/` is the **single source of truth**. The Gradle `syncFrontend` task
+(wired to `preBuild` in `android-app/app/build.gradle.kts`) mirrors it into
+`android-app/app/src/main/assets/frontend/` on every build — locally and in CI. Just edit
+`frontend/` and build; do not hand-edit the assets copy.
 
 ---
 
