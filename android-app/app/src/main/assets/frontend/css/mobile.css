@@ -232,13 +232,40 @@
 
 /* ── Modals: full-screen sheet on mobile ──────────────────── */
 @media (max-width: 860px) {
-  .modal-overlay { align-items: flex-end; padding: 0; }
-  .modal {
-    border-radius: var(--r-lg) var(--r-lg) 0 0;
-    max-width: 100% !important;
-    max-height: 88vh;
+  /* The overlay is just a dimmed backdrop. The modal itself is positioned with
+     fixed top/bottom so its height is deterministic and never depends on flex
+     distribution (which was collapsing the body to a sliver). */
+  .modal-overlay {
+    display: block;
+    padding: 0;
+    overflow: hidden;
   }
-  .modal-foot { flex-direction: column; gap: 8px; }
+  .modal {
+    position: fixed;
+    left: 0;
+    right: 0;
+    /* Box physically stops just above the fixed bottom nav (54px + safe area),
+       so head/body/foot are all on screen and the nav stays visible below. */
+    bottom: calc(54px + env(safe-area-inset-bottom, 0px));
+    /* Start near the top of the screen; everything between is the sheet. */
+    top: max(40px, env(safe-area-inset-top, 0px));
+    width: 100%;
+    max-width: 100% !important;
+    max-height: none;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    display: flex;
+    flex-direction: column;
+  }
+  /* Head and foot keep their natural height; only the body scrolls. */
+  .modal-head { flex: 0 0 auto; }
+  .modal-foot { flex: 0 0 auto; }
+  .modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .modal-foot { flex-direction: column; gap: 8px; padding-bottom: 20px; }
   .modal-foot .btn { width: 100%; }
   /* Primary action on top on mobile */
   .modal-foot .btn-primary { order: -1; }

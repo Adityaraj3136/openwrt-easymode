@@ -42,6 +42,15 @@ kotlin {
     jvmToolchain(17)
 }
 
+// Keep the bundled web UI in sync with the repo-root `frontend/`, which is the single
+// source of truth. Without this, edits to /frontend never reach the APK (the app serves
+// src/main/assets/frontend) and appear to "do nothing" until copied by hand.
+val syncFrontend by tasks.registering(Sync::class) {
+    from(rootProject.projectDir.parentFile.resolve("frontend"))
+    into(layout.projectDirectory.dir("src/main/assets/frontend"))
+}
+tasks.named("preBuild") { dependsOn(syncFrontend) }
+
 dependencies {
   val composeBom = platform(libs.androidx.compose.bom)
   implementation(composeBom)

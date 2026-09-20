@@ -1442,6 +1442,48 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
      */
     private fun collectWifiStations(): Map<String, JSONObject> {
         val stations = mutableMapOf<String, JSONObject>()
+
+        // Helper: pull assoclist for a real ifname and record every associated MAC.
+        fun harvest(ifname: String, ssid: String, radio: String) {
+            if (ifname.isEmpty()) return
+            val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", ifname)) ?: return
+            val results = assoc.optJSONArray("results") ?: return
+            for (r in 0 until results.length()) {
+                val e = results.optJSONObject(r) ?: continue
+                val mac = e.optString("mac").lowercase()
+                if (mac.isEmpty()) continue
+                // Prefer the entry with a real signal; don't overwrite a good one with a blank.
+                val existing = stations[mac]
+                if (existing == null || existing.opt("signal") == null || existing.isNull("signal")) {
+                    stations[mac] = JSONObject()
+                        .put("signal", e.opt("signal"))
+                        .put("ssid", ssid).put("radio", radio)
+                        .put("connectedSeconds", e.opt("connected_time"))
+                }
+            }
+        }
+
+        // Primary: enumerate the router's actual Wi-Fi interfaces via iwinfo. This never
+        // guesses ifnames, so it catches every radio's clients (fixes wireless clients on
+        // a second radio being missed and mislabelled as wired).
+        val devices = tryCall("iwinfo", "devices")?.optJSONArray("devices")
+        if (devices != null) {
+            for (i in 0 until devices.length()) {
+                val ifname = devices.optString(i, "")
+                if (ifname.isEmpty()) continue
+                // Only harvest AP interfaces; skip our own STA uplink (its "client" is the
+                // upstream AP, not a device on our network).
+                val info = tryCall("iwinfo", "info", JSONObject().put("device", ifname))
+                val infoMode = info?.optString("mode", "")?.lowercase() ?: ""
+                if (infoMode.contains("client") || infoMode.contains("sta")) continue
+                val ssid = info?.optString("ssid", "") ?: ""
+                harvest(ifname, ssid, ifname)
+            }
+        }
+
+        // Fallback / enrichment: walk UCI wifi-ifaces and resolve ifnames the old way.
+        // Runs regardless so SSID/radio labels map to UCI radio ids, and so it still works
+        // on firmware where `iwinfo devices` is unavailable.
         val wireless = uciOf("wireless")
         val netWireless = tryCall("network.wireless", "status") ?: JSONObject()
         wireless.keys().forEach { k ->
@@ -1466,19 +1508,7 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD(port) 
                 }
                 if (ifname.isEmpty()) ifname = resolveIfname(k, mode, apIndex)
                 apIndex++
-                if (ifname.isEmpty()) return@forEach
-                val assoc = tryCall("iwinfo", "assoclist", JSONObject().put("device", ifname))
-                assoc?.optJSONArray("results")?.let { results ->
-                    for (r in 0 until results.length()) {
-                        val e = results.optJSONObject(r) ?: continue
-                        val mac = e.optString("mac").lowercase()
-                        if (mac.isEmpty()) continue
-                        stations[mac] = JSONObject()
-                            .put("signal", e.opt("signal"))
-                            .put("ssid", ssid).put("radio", k)
-                            .put("connectedSeconds", e.opt("connected_time"))
-                    }
-                }
+                harvest(ifname, ssid, k)
             }
         }
         return stations
