@@ -1176,6 +1176,15 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             tryCall("file", "exec", JSONObject().put("command", "/sbin/wifi").put("params", JSONArray().put("reload")))
         }
         tryCall("network.wireless", "reload")
+
+        // Wait for hostapd to actually create the guest AP netdev before asking netifd to
+        // bring the guest interface up. If we call `guest up` too early the AP iface doesn't
+        // exist yet, netifd can't attach it to the `guest` network, and the AP falls back to
+        // br-lan — so guest clients get a LAN-subnet IP instead of the isolated guest subnet.
+        // (This is the seamless behaviour the PC reference gets by waiting; see backend/lib/guest.js.)
+        if (guestRadios.isNotEmpty() && enabled) {
+            try { Thread.sleep(5000) } catch (_: InterruptedException) {}
+        }
         tryCall("network.interface.guest", "up")
 
         return buildGuestWifi()
