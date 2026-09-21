@@ -1,7 +1,7 @@
 import { encryptionLabel } from '../derive.js';
 import { AppError } from '../errors.js';
 import { pickSafeLan, subnetsOverlap } from '../net.js';
-import { leaseFacts, readInterface, waitForLease } from '../probe.js';
+import { waitForLease } from '../probe.js';
 import { checkInternet } from '../status/connectivity.js';
 import { asList, findSection } from '../uci.js';
 import {
@@ -319,7 +319,10 @@ export function createWirelessUplinkPlan({ mode, label, sourceNoun }) {
         return { ok: false, reason: `The connection to "${ctx.options.ssid}" dropped after the change.` };
       }
 
-      const lease = leaseFacts(await readInterface(client, UPLINK_NETWORK));
+      // Re-associating after the apply bounces the radio, so udhcpc has to re-run DHCP.
+      // Poll for the lease exactly like preflight does — a single read races the handshake
+      // and falsely reports "no address" while the lease is still being acquired.
+      const lease = await waitForLease(client, UPLINK_NETWORK);
       if (!lease?.gateway) {
         return { ok: false, reason: `"${ctx.options.ssid}" stopped giving this router an address.` };
       }

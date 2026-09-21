@@ -1646,6 +1646,56 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
     }
 
     /**
+     * Live DHCP lease on the wireless uplink, read the same driver-agnostic way the
+     * dashboard detects "Main Wi-Fi": scan the network.interface dump for the uplink
+     * interface (wwan / wan_sta / repeater) that is up, has an IPv4 address, and has a
+     * default route with a gateway. Reading the lease off the network interface (not the
+     * STA netdev via iwinfo) keeps this independent of the STA ifname — phy0-sta0 on stock
+     * OpenWrt, apcliN on some vendor builds. Returns { ip, gateway } or null if no lease yet.
+     */
+    private fun uplinkLease(): JSONObject? {
+        val dump = tryCall("network.interface", "dump") ?: return null
+        val interfaces = dump.optJSONArray("interface") ?: return null
+        for (i in 0 until interfaces.length()) {
+            val iface = interfaces.optJSONObject(i) ?: continue
+            val name = iface.optString("interface")
+            if (!name.matches(Regex("wwan.*|wan_sta.*|repeater.*", RegexOption.IGNORE_CASE))) continue
+            if (!iface.optBoolean("up")) continue
+            val addrs = iface.optJSONArray("ipv4-address") ?: continue
+            if (addrs.length() == 0) continue
+            val ip = addrs.getJSONObject(0).optString("address", "")
+            if (ip.isEmpty()) continue
+            // A lease without a default route can't route traffic — hold out for the gateway,
+            // exactly as the PC reference's leaseFacts requires nexthop before calling it good.
+            val routes = iface.optJSONArray("route") ?: JSONArray()
+            var gateway: String? = null
+            for (r in 0 until routes.length()) {
+                val route = routes.optJSONObject(r) ?: continue
+                if (route.optString("target") == "0.0.0.0" && route.optInt("mask", -1) == 0) {
+                    gateway = route.optString("nexthop", null); break
+                }
+            }
+            if (gateway == null) continue
+            return JSONObject().put("ip", ip).put("gateway", gateway)
+        }
+        return null
+    }
+
+    /**
+     * Poll for the uplink DHCP lease until the deadline. Mirrors the PC reference's
+     * waitForLease: after a radio bounce the STA has to re-associate AND udhcpc has to
+     * re-run DHCP, so a single read races the handshake and falsely reports "no address".
+     * Polling is the fix — the same bug we just corrected in the PC verify().
+     */
+    private fun waitForUplinkLease(deadline: Long, delayMs: Long = 3000): JSONObject? {
+        while (true) {
+            uplinkLease()?.let { return it }
+            if (System.currentTimeMillis() + delayMs >= deadline) return null
+            try { Thread.sleep(delayMs) } catch (_: InterruptedException) {}
+        }
+    }
+
+    /**
      * Switch to Repeater mode: create a STA wifi-iface for the upstream network,
      * create a wwan network interface bridged to LAN for DHCP, disable DHCP server.
      */
@@ -1740,13 +1790,11 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
                 removeFromWanZone("wwan6")
             }
 
-            // The repeater keeps its own LAN address, so the app reconnects at the same IP
-            // even while the STA is still associating upstream. Apply behind the rollback
-            // timer and return promptly — do NOT block polling for association here. On this
-            // hardware the app watches the router over the same Wi-Fi, and a long synchronous
-            // wait made the request appear to hang; the dashboard's "Main Wi-Fi" status shows
-            // the real uplink state once it comes up. If the router never answers again, the
-            // rollback timer restores the previous mode on its own.
+            // The repeater keeps its own LAN address, so the router stays reachable at the
+            // same IP throughout — there's no lock-out risk and nothing to roll back to a
+            // "working" state, because the LAN never changes. So apply/commit is safe and
+            // self-confirming here; we do NOT pass a verify callback that could revert a
+            // perfectly good uplink (the mistake that made an earlier build hang for 70s).
             val applied = commitWithRollback(listOf("wireless", "network", "dhcp", "firewall"), settleMs = 6000)
             if (!applied) return err(Response.Status.INTERNAL_ERROR,
                 "The router didn't come back after switching to Repeater mode, so it restored your previous setup.",
@@ -1764,8 +1812,19 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
                 tryCall("file", "exec", JSONObject().put("command", "/etc/init.d/odhcpd").put("params", JSONArray().put("restart")))
             }
 
-            ok(JSONObject().put("mode", "repeater").put("ok", true).put("pending", true)
-                .put("message", "Connecting to \"$upstreamSsid\"… Give the router a moment, then check Main Wi-Fi on the dashboard."))
+            // Now confirm the uplink actually came up, rather than claiming success blindly.
+            // The radio just bounced, so the STA must re-associate AND udhcpc must pull a
+            // lease — that takes time. Poll (don't peek once) for up to ~30s, the same fix we
+            // applied to the PC verify(). LAN is unchanged so this only delays the response;
+            // it can't lock anyone out. Report the honest outcome either way.
+            val lease = waitForUplinkLease(System.currentTimeMillis() + 30_000)
+            val message = if (lease != null)
+                "Connected to \"$upstreamSsid\". This router now shares that network's internet; your devices reach it at $activeRouterIp."
+            else
+                "Applied, but \"$upstreamSsid\" hasn't handed out an address yet. If the password is right and the network is in range, it should connect shortly — check Main Wi-Fi on the dashboard."
+
+            ok(JSONObject().put("mode", "repeater").put("ok", true).put("pending", lease == null)
+                .put("connected", lease != null).put("message", message))
         } catch (e: Exception) {
             err(Response.Status.INTERNAL_ERROR, "Mode switch failed: ${e.message}")
         }
