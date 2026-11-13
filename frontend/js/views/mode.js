@@ -638,27 +638,37 @@ function successLines(modeId, summary) {
 /**
  * Result view for backends that apply the switch synchronously (Android), where the
  * response is the outcome itself rather than a job to poll. A reverted change arrives as a
- * thrown error and is handled by the caller, so reaching here means the switch was applied.
+ * thrown error and is handled by the caller; a 200 can still carry ok:false or connected:false.
  */
 function appliedView(container, modeId, result) {
   const meta = modeById(modeId);
   // Android returns { mode, ok, pending, message? } with no per-field summary, so don't
   // reuse successLines here (it would render "reachable at undefined"). Show the backend's
   // own message plus a mode-appropriate reconnect note.
-  const note = modeId === 'ap'
-    ? 'This router now takes its address from your main router. If EasyMode cannot reach it, reconnect to the router and open the app again.'
-    : 'Give the router a moment to finish switching, then reconnect if your device dropped off.';
+  // `ok:false` = nothing was changed; `connected:false` = applied but the uplink has no
+  // address yet. Neither is a success, so don't paint them green.
+  const failed = result?.ok === false;
+  const waiting = !failed && result?.connected === false;
+  const note = failed
+    ? 'Nothing was changed on the router.'
+    : modeId === 'ap'
+      ? 'This router now takes its address from your main router. If EasyMode cannot reach it, reconnect to the router and open the app again.'
+      : waiting
+        ? 'If it still shows no internet in a minute, re-check the Wi-Fi password and that the main network is in range, then run setup again.'
+        : 'Give the router a moment to finish switching, then reconnect if your device dropped off.';
+  const tone = failed ? 'bad' : waiting ? 'warn' : 'ok';
+  const heading = failed ? 'Setup could not be applied.' : waiting ? 'Applied — still connecting.' : 'Settings applied.';
   clear(container).append(
     panel({ icon: icon('router', { size: 19 }), title: `Setting up ${meta.title}`, className: 'progress-card wizard' }, [
-      el('div', { class: 'result ok' }, [
-        el('strong', { text: 'Settings applied.' }),
+      el('div', { class: `result ${tone}` }, [
+        el('strong', { text: heading }),
         result?.message ? el('span', { text: result.message }) : null,
         el('span', { text: note }),
       ].filter(Boolean)),
       el('button', { class: 'btn btn-primary', style: 'margin-top:16px', onclick: () => location.reload(), text: 'Done' }),
     ]),
   );
-  toast('Mode applied', { tone: 'ok' });
+  toast(failed ? 'Setup not applied' : waiting ? 'Applied — still connecting' : 'Mode applied', { tone: failed ? 'bad' : 'ok' });
 }
 
 function progressView(container, jobId, modeId, { onDone }) {

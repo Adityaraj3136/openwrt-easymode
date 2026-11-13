@@ -4,6 +4,7 @@ import { snapshotConfigs } from './backup.js';
 import { parseDhcpLeases } from './derive.js';
 import { AppError } from './errors.js';
 import { bitsToMask, hostInSubnet, ipToInt, isIpv4, networkAddress, subnetsOverlap } from './net.js';
+import { lanServesIpv6 } from './ipv6.js';
 import { fetchLeases } from './status/network.js';
 import { Uci, findSection, findSections } from './uci.js';
 import { requireIpv4, requireLeaseTime, requireRange, str } from './validate.js';
@@ -122,8 +123,7 @@ export async function getDhcpStatus(client, session) {
   const blocked = listBlocks(await client.uciGet('firewall')).map((entry) => ({ ...entry, label: nameFor(entry.mac) }));
   const blockedMacs = new Set(blocked.map((entry) => entry.mac));
 
-  // Determine IPv6 state using a layered approach for reliability.
-  let ipv6Enabled = false; // Hardcoded to false for pure IPv4 mode
+  const ipv6Enabled = lanServesIpv6(lanDhcp?.section);
 
   return {
     enabled,
@@ -196,11 +196,15 @@ export async function updateDhcp(client, session, body = {}) {
   
   const isRepeater = !!networkConfig.wwan;
 
-  // Always force pure IPv4 mode
-  values.dhcpv6 = 'disabled';
-  values.ra = 'disabled';
-  values.ndp = 'disabled';
-  
+  // IPv6 is owned by the /ipv6 toggle. Saving DHCP must not silently switch it off;
+  // only when it is already off do we re-assert the pure-IPv4 cleanup below.
+  const keepIpv6 = lanServesIpv6(lanDhcp?.section);
+  if (!keepIpv6) {
+    values.dhcpv6 = 'disabled';
+    values.ra = 'disabled';
+    values.ndp = 'disabled';
+  }
+
   if (lanDhcp) await uci.set('dhcp', lanDhcp.name, values);
   else await uci.ensure('dhcp', 'lan', 'dhcp', values);
 
@@ -209,10 +213,10 @@ export async function updateDhcp(client, session, body = {}) {
   else await uci.clearOptions('dhcp', sectionName, ['dhcp_option']);
 
   // Disable kernel IPv6 on the LAN interface so devices drop cached prefixes
-  await uci.set('network', 'lan', { ipv6: '0' });
+  if (!keepIpv6) await uci.set('network', 'lan', { ipv6: '0' });
 
   // For repeater mode: remove any IPv6 interfaces and relays
-  if (isRepeater) {
+  if (isRepeater && !keepIpv6) {
     const wwanKey = Object.keys(networkConfig).find(k => networkConfig[k]?.proto === 'dhcp' && k.startsWith('wwan')) ?? 'wwan';
     // Disable kernel IPv6 on the STA interface so Airtel's RAs are not processed.
     await uci.set('network', wwanKey, { ipv6: '0' });

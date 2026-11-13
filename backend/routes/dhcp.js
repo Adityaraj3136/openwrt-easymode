@@ -2,13 +2,10 @@ import { Router } from 'express';
 import { blockClient, unblockClient } from '../lib/clients.js';
 import { getLanSettings, updateLan } from '../lib/lan.js';
 import { addReservation, deleteReservation, getDhcpStatus, updateDhcp } from '../lib/dhcp.js';
+import { getIpv6Status, updateIpv6 } from '../lib/ipv6.js';
 import { asyncHandler, requireSession } from '../middleware/auth.js';
 
 export const dhcpRouter = Router();
-
-dhcpRouter.get('/dhcp/debug', asyncHandler(async (req, res) => {
-  res.json(await req.ubus.uciGet('dhcp'));
-}));
 
 dhcpRouter.use(requireSession);
 
@@ -23,6 +20,20 @@ dhcpRouter.post(
   '/dhcp',
   asyncHandler(async (req, res) => {
     res.json(await updateDhcp(req.ubus, req.session, req.body));
+  }),
+);
+
+dhcpRouter.get(
+  '/ipv6',
+  asyncHandler(async (req, res) => {
+    res.json(await getIpv6Status(req.ubus));
+  }),
+);
+
+dhcpRouter.post(
+  '/ipv6',
+  asyncHandler(async (req, res) => {
+    res.json(await updateIpv6(req.ubus, req.session, req.body));
   }),
 );
 

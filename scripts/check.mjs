@@ -35,6 +35,7 @@ import { parseRouterOptions } from '../backend/lib/modes/router.js';
 import { Uci, asList, findSection, findSections } from '../backend/lib/uci.js';
 import { byNetworkName, mergeScanResults, normalizeScanEntry, sortScanResults } from '../backend/lib/wifi-scan.js';
 import { blockingSupport, listBlocks } from '../backend/lib/clients.js';
+import { getIpv6Status, lanServesIpv6 } from '../backend/lib/ipv6.js';
 
 // --- band derivation (radio0/radio1 must never imply a band) -----------------
 assert.equal(bandFromFrequency(2437), '2.4');
@@ -514,7 +515,8 @@ const ensureUci = new Uci(ensureClient);
 const created = await ensureUci.ensure('network', 'wwan', 'interface', { proto: 'dhcp' });
 const createCall = ensureClient.calls.at(-1);
 assert.equal(created, true);
-assert.equal(createCall.method, 'set');
+assert.equal(createCall.method, 'add', 'a missing section is created with a named add');
+assert.equal(createCall.args.name, 'wwan');
 assert.equal(createCall.args.type, 'interface', 'creating a missing section must carry its type');
 
 const existed = await ensureUci.ensure('network', 'lan', 'interface', { ipaddr: '192.168.8.1' });
@@ -542,5 +544,16 @@ assert.equal(findSections(firewall, 'zone').length, 2);
 assert.deepEqual(asList('lan'), ['lan'], 'a single-value UCI list is still a list');
 assert.deepEqual(asList(['wan', 'wan6']), ['wan', 'wan6']);
 assert.deepEqual(asList(undefined), []);
+
+// --- IPv6 state ---------------------------------------------------------------
+// DHCP saves preserve IPv6 based on this, so a wrong answer silently flips IPv6 off.
+assert.equal(lanServesIpv6({ ra: 'server' }), true);
+assert.equal(lanServesIpv6({ dhcpv6: 'relay' }), true);
+assert.equal(lanServesIpv6({ ra: 'disabled', dhcpv6: 'disabled' }), false);
+assert.equal(lanServesIpv6(undefined), false);
+const ipv6Client = (dhcp, network) => ({ uciGet: async (c) => (c === 'dhcp' ? dhcp : network) });
+assert.equal((await getIpv6Status(ipv6Client({ lan: { '.type': 'dhcp', interface: 'lan', ra: 'server' } }, { wan6: { proto: 'dhcpv6' } }))).mode, 'global');
+assert.equal((await getIpv6Status(ipv6Client({ lan: { '.type': 'dhcp', interface: 'lan', ra: 'server' } }, {}))).mode, 'local');
+assert.equal((await getIpv6Status(ipv6Client({ lan: { '.type': 'dhcp', interface: 'lan' } }, { wan6: { proto: 'dhcpv6' } }))).enabled, false);
 
 console.log('all checks passed');
