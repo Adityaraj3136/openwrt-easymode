@@ -107,7 +107,11 @@ export async function getDhcpStatus(client, session) {
     ip: host.ip ?? null,
   }));
 
-  const storedMode = Object.values(easymode).find((entry) => entry['.type'] === 'state')?.mode ?? null;
+  // First use: EasyMode has never recorded a mode, so read it off the live config instead
+  // of assuming "router" - otherwise an existing access point gets a second DHCP server.
+  const recordedMode = Object.values(easymode).find((entry) => entry['.type'] === 'state')?.mode ?? null;
+  const looksLikeAp = lan.proto === 'dhcp' || (!enabled && Boolean(lan.gateway));
+  const storedMode = recordedMode ?? (network.wwan ? 'repeater' : looksLikeAp ? 'ap' : null);
   const leases = await fetchLeases(client, session);
 
   const dnsOption = []

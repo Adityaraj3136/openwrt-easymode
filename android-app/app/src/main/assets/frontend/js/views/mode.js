@@ -6,6 +6,19 @@ import { MODES, modeById, modeCard } from './mode-cards.js';
 
 const STEPS = ['Connection', 'Home network', 'Wi-Fi', 'Review'];
 
+// Intervals started inside wizard steps (e.g. the disconnect countdown) are tracked here
+// so renderModeSetup's teardown can clear them when the user navigates away mid-countdown.
+const activeTimers = new Set();
+function trackInterval(fn, ms) {
+  const id = setInterval(fn, ms);
+  activeTimers.add(id);
+  return id;
+}
+function clearTrackedInterval(id) {
+  clearInterval(id);
+  activeTimers.delete(id);
+}
+
 const field = (label, input, hint) =>
   el('div', { class: 'field' }, [
     el('label', { text: label }),
@@ -89,7 +102,9 @@ function networkPicker(state, overview, onPick) {
             class: `scan-row${state.ssid === network.ssid ? ' selected' : ''}`,
             onclick: () => {
               state.ssid = network.ssid;
-              state.encryption = network.encryption;
+              // Prefer the explicit mode string (psk2 / sae-mixed / ...); fall back to
+              // network.encryption which the backend also returns as the mode.
+              state.encryption = network.encryptionMode ?? network.encryption;
               state.needsPassword = network.needsPassword;
               draw(networks);
               onPick();
@@ -164,7 +179,6 @@ function routerSteps(state, overview) {
     ssid: el('input', { value: state.wifiSsid ?? overview.defaults.wifiSsid ?? '' }),
     key: el('input', { type: 'password', value: state.wifiKey ?? overview.defaults.wifiKey ?? '', placeholder: 'At least 8 characters' }),
     macaddr: el('input', { placeholder: '00:11:22:33:44:55', value: state.macaddr ?? '' }),
-    ipv6: toggle({ checked: state.ipv6 !== false, label: 'Enable IPv6', hint: 'Keep this on if your provider supports IPv6.' }),
   };
 
   const CONNECTIONS = [
@@ -210,7 +224,7 @@ function routerSteps(state, overview) {
           stepHero('cable', 'How does the internet reach this router?', 'Plug the cable from your modem or main router into the internet (WAN) port.'),
           preflight.ready
             ? el('div', { style: 'margin-bottom:16px' }, [badge('Cable detected in the internet port', 'ok')])
-            : el('div', { class: 'alert alert-warning' }, [
+            : el('div', { class: 'alert alert-warn' }, [
                 icon('alert', { size: 18 }),
                 el('div', {}, [el('span', { text: preflight.reason ?? 'No cable detected in the internet port. You can still set up the router now and plug it in later.' })]),
               ]),
@@ -218,9 +232,6 @@ function routerSteps(state, overview) {
           pppoeBox,
           staticBox,
           advanced('Advanced settings', [
-            // IPv6 removed for pure IPv4 mode
-            // inputs.ipv6,
-            // el('div', { style: 'height:12px' }),
             field('MAC address clone', inputs.macaddr, 'Optional. Use when your ISP locks your connection to a specific device.'),
           ]),
         ]);
@@ -229,7 +240,6 @@ function routerSteps(state, overview) {
         // state.connection is updated by the change listener, but if it was never changed,
         // it might be undefined. Default it to 'auto' if so.
         if (!state.connection) state.connection = 'auto';
-        state.ipv6 = false; // Hardcoded to false
         state.pppoe = { username: inputs.pppoeUser.value, password: inputs.pppoePass.value };
         state.static = {
           ip: inputs.staticIp.value,
@@ -379,7 +389,6 @@ function wirelessSteps(state, overview, variant) {
     lanIp: el('input', { value: overview.defaults.lanIp ?? '' }),
     ssid: el('input', { value: state.wifiSsid ?? overview.defaults.wifiSsid ?? '' }),
     key: el('input', { type: 'password', value: state.wifiKey ?? overview.defaults.wifiKey ?? '', placeholder: 'At least 8 characters' }),
-    ipv6: toggle({ checked: state.ipv6 !== false, label: 'Enable IPv6', hint: 'Keep this on if your provider supports IPv6.' }),
   };
   const hotspot = variant === 'hotspot';
 
@@ -413,16 +422,16 @@ function wirelessSteps(state, overview, variant) {
                   try {
                     await api.disconnectRepeater();
                     let seconds = 65;
-                    const interval = setInterval(() => {
+                    const interval = trackInterval(() => {
                       seconds -= 1;
                       btn.textContent = `Applying... ${seconds}s`;
                       if (seconds <= 0) {
-                        clearInterval(interval);
+                        clearTrackedInterval(interval);
                         location.reload();
                       }
                     }, 1000);
                   } catch (e) {
-                    alert('Failed: ' + e.message);
+                    toast('Could not disconnect', { tone: 'bad', detail: e.message });
                     btn.disabled = false;
                     btn.textContent = 'Disconnect';
                   }
@@ -468,6 +477,15 @@ function wirelessSteps(state, overview, variant) {
     },
     {
       render() {
+        const ipv6Toggle = toggle({
+          checked: Boolean(state.ipv6),
+          label: 'Pass through IPv6',
+          hint: `Let devices get IPv6 addresses from ${hotspot ? 'your phone' : 'the network you joined'}, when it offers them. Leave off for plain IPv4 — turn it on later in Devices if you are unsure.`,
+          onChange: (checked) => {
+            state.ipv6 = checked;
+          },
+        });
+
         return el('div', {}, [
           stepHero('network', 'Your home network', 'Devices connect to this router and get their addresses from it.'),
           el('div', { class: 'alert alert-info' }, [
@@ -478,17 +496,14 @@ function wirelessSteps(state, overview, variant) {
               }),
             ]),
           ]),
+          ipv6Toggle,
           advanced('Advanced settings', [
-            // IPv6 removed for pure IPv4 mode
-            // inputs.ipv6,
-            // el('div', { style: 'height:12px' }),
             field('Router address', inputs.lanIp, 'Leave as it is unless you know you need a specific range.')
           ]),
         ]);
       },
       commit() {
         state.lanIp = inputs.lanIp.value.trim();
-        state.ipv6 = false; // Hardcoded to false
       },
     },
     wifiStep(state, inputs, 'Wi-Fi for your own devices'),
@@ -500,6 +515,7 @@ function wirelessSteps(state, overview, variant) {
             ['Mode', hotspot ? 'Mobile Hotspot' : 'Wi-Fi Repeater'],
             [hotspot ? 'Phone hotspot' : 'Network to extend', state.ssid],
             ['Router address', state.lanIp || overview.defaults.lanIp],
+            ['IPv6', state.ipv6 ? 'On (when available)' : 'Off (IPv4 only)'],
             ['Wi-Fi for your devices', state.changeWifi ? state.wifiSsid : 'Left unchanged'],
           ]),
         ]);
@@ -560,7 +576,7 @@ function buildPayload(modeId, state) {
     : { enabled: false };
 
   if (modeId === 'router') {
-    const payload = { connection: state.connection, lan: { leasetime: state.leasetime || '12h' }, wifi, ipv6: state.ipv6 !== false };
+    const payload = { connection: state.connection, lan: { leasetime: state.leasetime || '12h' }, wifi };
     if (state.lanIp) payload.lan.ip = state.lanIp;
     if (state.connection === 'pppoe') payload.pppoe = state.pppoe;
     if (state.connection === 'static') payload.static = state.static;
@@ -579,9 +595,9 @@ function buildPayload(modeId, state) {
     ssid: state.ssid,
     key: state.password ?? '',
     encryption: state.encryption ?? 'psk2',
+    ipv6: Boolean(state.ipv6),
     lan: state.lanIp ? { ip: state.lanIp } : {},
     wifi,
-    ipv6: state.ipv6 !== false,  // forward the user's IPv6 toggle choice to the backend
   };
 }
 
@@ -617,6 +633,42 @@ function successLines(modeId, summary) {
       : `Connection established (${summary.wanIp ?? 'address received'}). Internet could not be tested from here.`,
     summary.lanMoved ? `Your home network moved to ${summary.lanMoved.to} to avoid a clash.` : null,
   ].filter(Boolean);
+}
+
+/**
+ * Result view for backends that apply the switch synchronously (Android), where the
+ * response is the outcome itself rather than a job to poll. A reverted change arrives as a
+ * thrown error and is handled by the caller; a 200 can still carry ok:false or connected:false.
+ */
+function appliedView(container, modeId, result) {
+  const meta = modeById(modeId);
+  // Android returns { mode, ok, pending, message? } with no per-field summary, so don't
+  // reuse successLines here (it would render "reachable at undefined"). Show the backend's
+  // own message plus a mode-appropriate reconnect note.
+  // `ok:false` = nothing was changed; `connected:false` = applied but the uplink has no
+  // address yet. Neither is a success, so don't paint them green.
+  const failed = result?.ok === false;
+  const waiting = !failed && result?.connected === false;
+  const note = failed
+    ? 'Nothing was changed on the router.'
+    : modeId === 'ap'
+      ? 'This router now takes its address from your main router. If EasyMode cannot reach it, reconnect to the router and open the app again.'
+      : waiting
+        ? 'If it still shows no internet in a minute, re-check the Wi-Fi password and that the main network is in range, then run setup again.'
+        : 'Give the router a moment to finish switching, then reconnect if your device dropped off.';
+  const tone = failed ? 'bad' : waiting ? 'warn' : 'ok';
+  const heading = failed ? 'Setup could not be applied.' : waiting ? 'Applied — still connecting.' : 'Settings applied.';
+  clear(container).append(
+    panel({ icon: icon('router', { size: 19 }), title: `Setting up ${meta.title}`, className: 'progress-card wizard' }, [
+      el('div', { class: `result ${tone}` }, [
+        el('strong', { text: heading }),
+        result?.message ? el('span', { text: result.message }) : null,
+        el('span', { text: note }),
+      ].filter(Boolean)),
+      el('button', { class: 'btn btn-primary', style: 'margin-top:16px', onclick: () => location.reload(), text: 'Done' }),
+    ]),
+  );
+  toast(failed ? 'Setup not applied' : waiting ? 'Applied — still connecting' : 'Mode applied', { tone: failed ? 'bad' : 'ok' });
 }
 
 function progressView(container, jobId, modeId, { onDone }) {
@@ -663,15 +715,19 @@ function progressView(container, jobId, modeId, { onDone }) {
         );
         toast('Mode configured successfully', { tone: 'ok' });
       } else {
+        const autoReverted = modeId === 'router' || modeId === 'repeater';
+        const recovery = job.recovery ?? (autoReverted
+          ? 'Your previous settings were restored.'
+          : 'Check the router at its previous address; you may need to reconnect or reset it.');
         body.append(
           el('div', { class: 'result bad' }, [
             el('strong', { text: 'Setup did not complete.' }),
             el('span', { text: job.error ?? 'Unknown error.' }),
-            el('span', { text: job.recovery ?? 'Your previous settings were restored.' }),
+            el('span', { text: recovery }),
           ]),
           el('button', { class: 'btn btn-ghost', style: 'margin-top:16px', onclick: onDone, text: 'Back to modes' }),
         );
-        toast('Setup failed — previous settings restored', { tone: 'bad' });
+        toast(autoReverted ? 'Setup failed — previous settings restored' : 'Setup failed', { tone: 'bad' });
       }
     } catch (error) {
       if (stopped) return;
@@ -786,18 +842,31 @@ export function renderModeSetup(container, { onUnauthorized }) {
           return;
         }
 
+        // Router/Repeater keep a fixed LAN address, so the app can reconnect and the
+        // router auto-reverts if the change locks it out. Access Point mode takes a new
+        // address from the main router, so there is no safe auto-revert to promise.
+        const autoReverts = modeId === 'router' || modeId === 'repeater';
         const confirmed = await confirmDialog({
           title: `Switch to ${meta.title} mode?`,
           message: 'Your devices lose connection for a few seconds while the router applies the change.',
-          detail: 'If the new settings do not work, the router restores the previous ones by itself.',
+          detail: autoReverts
+            ? 'If the new settings lock the router out, it restores the previous ones by itself.'
+            : 'This router will take a new address from your main router. Note the address shown when setup finishes — you will need it to open EasyMode again.',
           confirmLabel: 'Apply setup',
         });
         if (!confirmed) return;
 
         next.disabled = true;
         try {
-          const job = await APPLY[modeId](buildPayload(modeId, state));
-          cancelPolling = progressView(body, job.jobId, modeId, { onDone: showOverview });
+          const result = await APPLY[modeId](buildPayload(modeId, state));
+          if (result?.jobId) {
+            // Node backend: a background job to poll for step-by-step progress.
+            cancelPolling = progressView(body, result.jobId, modeId, { onDone: showOverview });
+          } else {
+            // Android backend: the switch already ran synchronously (a thrown error would
+            // mean it reverted). There is no job to poll — show the result directly.
+            appliedView(body, modeId, result);
+          }
         } catch (error) {
           if (error.status === 401) return onUnauthorized();
           clear(errorSlot).append(errorState(error));
@@ -819,5 +888,10 @@ export function renderModeSetup(container, { onUnauthorized }) {
   };
 
   showOverview();
-  return () => cancelPolling?.();
+  return () => {
+    cancelPolling?.();
+    // Stop any in-flight countdown so it can't fire location.reload() after teardown.
+    for (const id of activeTimers) clearInterval(id);
+    activeTimers.clear();
+  };
 }

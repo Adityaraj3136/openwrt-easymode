@@ -102,6 +102,11 @@ assert.equal(stale.id, 'router');
 assert.equal(stale.matchesStored, false);
 
 assert.equal(detectMode({}).id, 'unknown');
+// First use, never configured by EasyMode: stock router with the WAN cable unplugged.
+const firstUse = detectMode({ wanUp: false, wanDevice: 'eth1', lanDhcpDisabled: false });
+assert.equal(firstUse.id, 'router');
+assert.equal(firstUse.source, 'detected');
+assert.equal(detectMode({ wanUp: false, wanDevice: 'eth1', lanDhcpDisabled: true }).id, 'ap');
 assert.equal(internetSourceLabel('repeater', { staSsid: 'Home' }), 'Wi-Fi network "Home"');
 assert.equal(internetSourceLabel('ap'), 'Main router via Ethernet');
 assert.match(internetSourceLabel('router', { wanProto: 'pppoe', wanDevice: 'eth0' }), /PPPOE/);

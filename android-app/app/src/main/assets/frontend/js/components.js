@@ -187,7 +187,12 @@ const FRIENDLY = {
   JOB_RUNNING: 'A setup is already running. Wait for it to finish first.',
   DHCP_MANAGED_ELSEWHERE: 'Your main router is handing out addresses while this router is an access point.',
   NO_WAN_LINK: 'No cable detected in the internet port.',
-  UPLINK_NOT_ASSOCIATED: 'Could not join that Wi-Fi network. Check the password and signal.',
+  // UPLINK_NOT_ASSOCIATED is intentionally not mapped: the backend sends a message naming
+  // the specific network it couldn't join, which friendlyError falls back to.
+  SCAN_BAND_BUSY: 'This band is connected to your main router, so it can’t scan for networks at the same time. Switch to the other band to scan.',
+  SCAN_FAILED: 'The router couldn’t scan for Wi-Fi networks right now. If this band also connects to your main router, try the other band.',
+  // CHANGE_REVERTED is intentionally not mapped: the backend sends a context-specific
+  // message per operation (LAN IP / IPv6 / each mode), which friendlyError falls back to.
 };
 
 export const friendlyError = (error) => FRIENDLY[error?.code] ?? error?.message ?? 'Something went wrong.';

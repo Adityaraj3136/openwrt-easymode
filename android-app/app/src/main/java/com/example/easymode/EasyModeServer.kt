@@ -651,10 +651,15 @@ class EasyModeServer(private val context: Context, port: Int) : NanoHTTPD("127.0
             }
         }
 
-        // Check if AP mode: LAN interface has proto=dhcp (gets IP from upstream)
+        // Detected from live config, so a router EasyMode never configured (first use, or set
+        // up by hand in LuCI) still shows its real mode. AP = LAN takes its address from the
+        // main router (proto=dhcp), or LAN's DHCP server is off and LAN points at a gateway
+        // (the usual LuCI "dumb AP" setup).
         val network = uciOf("network")
         val lanSec = network.optJSONObject("lan") ?: JSONObject()
-        if (modeId != "repeater" && lanSec.optString("proto") == "dhcp") modeId = "ap"
+        val lanDhcpOff = uciOf("dhcp").optJSONObject(lanDhcpSectionKey())?.optString("ignore") == "1"
+        val lanHasGateway = lanSec.optString("gateway").isNotEmpty()
+        if (modeId != "repeater" && (lanSec.optString("proto") == "dhcp" || (lanDhcpOff && lanHasGateway))) modeId = "ap"
 
         val internetSource = when (modeId) {
             "repeater" -> "Wireless Uplink${if (uplinkSsid != null) " ($uplinkSsid)" else ""}"

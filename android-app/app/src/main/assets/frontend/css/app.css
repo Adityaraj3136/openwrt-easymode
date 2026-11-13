@@ -585,6 +585,8 @@ svg { display: block; flex-shrink: 0; }
 .result.ok strong { color: #15803d; }
 .result.bad { background: var(--err-soft); }
 .result.bad strong { color: #b91c1c; }
+.result.warn { background: var(--warn-soft); }
+.result.warn strong { color: #b45309; }
 
 .congestion { display: flex; flex-wrap: wrap; gap: 6px; }
 .congestion-item { display: grid; gap: 1px; padding: 8px 12px; border-radius: var(--r-sm); background: var(--surface-muted); border: 1px solid var(--line); min-width: 80px; }

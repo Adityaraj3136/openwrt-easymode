@@ -162,10 +162,12 @@ export function detectMode({ storedMode, staUplink, wanUp, wanDevice, lanDhcpDis
     detected = 'repeater';
   } else if (wanUp && wanDevice) {
     detected = 'router';
-  } else if (lanDhcpDisabled && lanHasGateway) {
-    detected = 'ap';
   } else if (lanDhcpDisabled) {
     detected = 'ap';
+  } else if (wanDevice) {
+    // First use on a stock router with the WAN cable unplugged: WAN is configured and
+    // the LAN hands out addresses, so it is a router - just one without internet yet.
+    detected = 'router';
   }
 
   // Stored intent only refines the wireless-uplink pair; it never overrules the wire.

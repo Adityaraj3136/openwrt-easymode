@@ -29,6 +29,8 @@ function download(filename, payload) {
    ============================================================ */
 function infoPanel(data) {
   const { system, router } = data;
+  const memory = system.memory ?? {};
+  const capabilities = data.capabilities ?? {};
   return panel(
     {
       icon: icon('router', { size: 19 }),
@@ -42,7 +44,7 @@ function infoPanel(data) {
         ['OpenWrt version', system.version],
         ['Router address', router.host, 'mono'],
         ['Signed in as', router.username],
-        ['Memory', system.memory.total ? `${formatBytes(system.memory.used)} of ${formatBytes(system.memory.total)}` : null],
+        ['Memory', memory.total ? `${formatBytes(memory.used)} of ${formatBytes(memory.total)}` : null],
       ]),
       el('details', { class: 'advanced' }, [
         el('summary', { text: 'Router capabilities' }),
@@ -51,7 +53,7 @@ function infoPanel(data) {
           'div',
           { class: 'caps' },
           Object.entries(CAPABILITY_LABELS).map(([key, label]) =>
-            badge(label, data.capabilities[key] ? 'ok' : 'neutral', { dot: Boolean(data.capabilities[key]) }),
+            badge(label, capabilities[key] ? 'ok' : 'neutral', { dot: Boolean(capabilities[key]) }),
           ),
         ),
         el('div', { style: 'height:14px' }),
